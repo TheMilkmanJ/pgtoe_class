@@ -1,10 +1,10 @@
 theory:
   classy:
-    path: /mnt/c/Users/themi/projects/prtoe_class
+    path: 
     stop_at_error: false
     extra_args:
       use_prtoe: 'no'
-      base_path: /mnt/c/Users/themi/projects/prtoe_class
+      base_path: 
       gauge: newtonian
       hyper_flat_approximation_nu: 7000.0
       transfer_neglect_delta_k_S_t0: 0.17
@@ -81,4 +81,4 @@ sampler:
     nlive: 200
     num_repeats: 20
 output: lcdm_poly
-packages_path: /home/themilkmanj/cobaya_packages_clean
+packages_path: 
