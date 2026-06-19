@@ -1654,11 +1654,39 @@ ${strugglesText}`;
 - Machine Specification: ${provMachine}`;
             }
 
+            // Scrape Selected Config Template
+            const selectedTemplate = document.getElementById('select-config-template') ? document.getElementById('select-config-template').value : "Default/Active Settings";
+
+            // Scrape Likelihood Terrain params
+            const terrainX = document.getElementById('terrain-param-x') ? document.getElementById('terrain-param-x').value : "-";
+            const terrainY = document.getElementById('terrain-param-y') ? document.getElementById('terrain-param-y').value : "-";
+            const terrainSummary = `Degeneracy Terrain X-Axis: ${terrainX} | Y-Axis: ${terrainY}`;
+
+            // Scrape Model Deformation alpha
+            const deformAlpha = document.getElementById('slide-deform-alpha') ? document.getElementById('slide-deform-alpha').value : "0.00";
+
+            // Scrape Chain Quality convergence diagnostics
+            let chainQualitySummary = "No convergence diagnostics loaded.";
+            const qualityRows = document.querySelectorAll('#chain-quality-table-body tr');
+            if (qualityRows.length > 0) {
+                chainQualitySummary = "";
+                qualityRows.forEach(row => {
+                    const cols = row.querySelectorAll('td');
+                    if (cols.length === 4) {
+                        chainQualitySummary += `- ${cols[0].textContent.trim()}: R̂ (PSRF) = ${cols[1].textContent.trim()}, ESS = ${cols[2].textContent.trim()} [Status: ${cols[3].textContent.trim()}]\n`;
+                    }
+                });
+            }
+
             const promptText = `Here is the cosmological data from my CLASS & Cobaya run. Please analyze these diagnostics, evaluate if the custom model resolves the H0 and S8 tensions, check the model struggles/stability, and explain the physical implications:
 
 ### Run Status
 - Status: ${status}
 - Stagnation Detected: ${lastStatusData.stagnation_detected ? "Yes (" + lastStatusData.stagnation_reason + ")" : "No"}
+
+### Configurable Run Template System
+- Active Run Configuration Template: ${selectedTemplate}
+- Model Deformation Parameter (\u03b1): ${deformAlpha}
 
 ### Scientific Provenance & Reproducibility Ledger
 ${provenanceSummary}
@@ -1679,7 +1707,13 @@ ${runCompareSummary}
 ${rhVal}
 - Neutrino Sector Setup: ${ncdmVal}
 
-### Late-Time Jacobian Sensitivity (∂ln(Observable) / ∂ln(Parameter))
+### MCMC Chain Quality & Convergence Diagnostics (PSRF & ESS)
+${chainQualitySummary}
+
+### Likelihood Terrain Degeneracy Dimensions
+- ${terrainSummary}
+
+### Late-Time Jacobian Sensitivity (\u2202ln(Observable) / \u2202ln(Parameter))
 ${jacobianText}
 
 ### Dataset Pulls & Parameter Shifts
@@ -1694,7 +1728,7 @@ ${autopsyText}
 ### Cosmo Curves Parameters (Late-Time Dynamics)
 - Effective w0 (equation of state at z=0): ${w0Val}
 - Effective wa (EoS crossing slope): ${waVal}
-- Structure Growth Index γ0: ${gammaVal}
+- Structure Growth Index \u03b30: ${gammaVal}
 
 ### Cosmic Tension Dashboard & Discrepancies
 ${tensionVal}
