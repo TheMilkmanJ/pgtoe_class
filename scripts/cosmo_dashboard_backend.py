@@ -45,8 +45,30 @@ LOG_EVAL_POSITION = 0
 LOG_EVAL_COUNT = 0
 
 
+# --- HTTP Basic Authentication for Remote Security ---
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi import Depends, status
+import secrets
+
+security = HTTPBasic()
+
+def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
+    required_user = os.environ.get("DASHBOARD_USER", "TheMilkmanJ")
+    required_pass = os.environ.get("DASHBOARD_PASS", "Freemilk420!")
+    
+    correct_username = secrets.compare_digest(credentials.username, required_user)
+    correct_password = secrets.compare_digest(credentials.password, required_pass)
+    
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
 # --- FastAPI App Setup ---
-app = FastAPI(title="CosmicDashboard Backend")
+app = FastAPI(title="CosmicDashboard Backend", dependencies=[Depends(authenticate)])
 
 # Allow all origins for local file:// access from the browser
 app.add_middleware(

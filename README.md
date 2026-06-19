@@ -52,7 +52,10 @@ Since CosmicDashboard is built with responsive web layouts, you can securely mon
    ```bash
    npx localtunnel --port 8000
    ```
-3. **Open the Link:** It will output a private public URL (e.g., `https://cosmic-run-x.loca.lt`). Open this link in your phone's browser (Safari, Chrome, etc.) to view and control your run from anywhere in the world!
+3. **Open the Link & Authenticate:** It will output a public URL (e.g., `https://cosmic-run-x.loca.lt`). Open this link in your phone's browser (Safari, Chrome, etc.). The page is secured by HTTP Basic Authentication to prevent unauthorized access.
+   * **Default Username:** `TheMilkmanJ`
+   * **Default Password:** `Freemilk420!`
+   *(Note: You can customize these credentials by setting the `DASHBOARD_USER` and `DASHBOARD_PASS` environment variables on your host machine before launching the server).*
 
 ### Advanced Academic & Diagnostic Features:
 
