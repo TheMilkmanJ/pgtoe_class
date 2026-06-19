@@ -981,7 +981,9 @@ def get_localtunnel_url():
     import glob
     import re
     search_pattern = "/home/themilkmanj/.gemini/antigravity-cli/brain/*/.system_generated/tasks/task-*.log"
-    for log_path in glob.glob(search_pattern):
+    log_files = glob.glob(search_pattern)
+    log_files.sort(key=os.path.getmtime, reverse=True)
+    for log_path in log_files:
         try:
             if os.path.exists(log_path):
                 with open(log_path, "r") as f:
