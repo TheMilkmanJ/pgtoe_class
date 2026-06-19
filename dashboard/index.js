@@ -394,6 +394,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 btnArchiveReplay.disabled = false;
             }
         });
+    }
     // Run Configuration Template System
     refreshTemplatesList();
 
