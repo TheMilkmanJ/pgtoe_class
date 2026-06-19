@@ -1582,6 +1582,43 @@ ${strugglesText}`;
                 ncdmVal = `Neutrino Sector: Enabled (m_ν = ${n.mass !== null ? n.mass.toFixed(3) + ' eV' : 'unknown'}, struggles = ${n.struggles}, q_bins = ${n.q_bins || 'default'}, fluid_approx = ${n.fluid_approx || 'default'}, l_max_ncdm = ${n.l_max_ncdm || 'default'})`;
             }
 
+            // Cosmo curves phi(z) summary
+            let phiVal = "No scalar field profile computed.";
+            if (lastStatusData.cosmo_curves && lastStatusData.cosmo_curves.phi && lastStatusData.cosmo_curves.phi.length > 0) {
+                const phi = lastStatusData.cosmo_curves.phi;
+                const phi_z0 = phi[0].toFixed(4);
+                const phi_z25 = phi[phi.length - 1].toFixed(4);
+                phiVal = `phi(z=0) = ${phi_z0}, phi(z=2.5) = ${phi_z25} (Full profile: [${phi.slice(0, 5).map(v => v.toFixed(3)).join(', ')} ... ${phi.slice(-5).map(v => v.toFixed(3)).join(', ')}])`;
+            }
+
+            // Scrape Sampler Brain (Covariance Matrix)
+            let samplerBrainSummary = "No proposal covariance matrix loaded.";
+            const samplerBrainTable = document.getElementById('sampler-brain-matrix');
+            if (samplerBrainTable) {
+                const rows = samplerBrainTable.querySelectorAll('tr');
+                if (rows.length > 1) {
+                    samplerBrainSummary = "";
+                    const headers = Array.from(rows[0].querySelectorAll('th')).map(el => el.textContent.trim());
+                    for (let i = 1; i < rows.length; i++) {
+                        const cols = rows[i].querySelectorAll('td');
+                        if (cols.length > 0) {
+                            const paramName = cols[0].textContent.trim();
+                            const correlations = [];
+                            for (let j = 1; j < cols.length; j++) {
+                                correlations.push(`${headers[j]}: ${cols[j].textContent.trim()}`);
+                            }
+                            samplerBrainSummary += `- ${paramName} correlations: [${correlations.join(', ')}]\n`;
+                        }
+                    }
+                }
+            }
+
+            // CLASS raw error logs
+            let classErrorLogsText = "No recent CLASS Boltzmann solver error log snippets recorded.";
+            if (lastStatusData.class_error_logs && lastStatusData.class_error_logs.length > 0) {
+                classErrorLogsText = lastStatusData.class_error_logs.slice(-5).join('\n---\n');
+            }
+
             // Scrape new visual diagnostics information from the UI
             const jacobianText = document.getElementById('jacobian-heatmap-container') ? document.getElementById('jacobian-heatmap-container').innerText.trim() : "No Jacobian computed.";
             const pullsText = document.getElementById('dataset-pull-container') ? document.getElementById('dataset-pull-container').innerText.trim() : "No dataset pulls available.";
@@ -1590,23 +1627,25 @@ ${strugglesText}`;
             // Scrape Per-Point Chi2 data
             let perPointSummary = "No per-point chi2 data loaded.";
             if (perPointDataCache) {
-                const selectDataset = document.getElementById('select-perpoint-dataset');
-                const datasetType = selectDataset ? selectDataset.value : 'bao';
-                const cacheList = perPointDataCache[datasetType] || [];
-                perPointSummary = `Dataset Type: ${datasetType.toUpperCase()}\n`;
-                cacheList.slice(0, 8).forEach(item => {
-                    if (datasetType === 'bao') {
-                        perPointSummary += `- ID ${item.id} (${item.dataset}) at z=${item.redshift.toFixed(3)}: residual=${item.residual.toFixed(5)}, chi2=${item.chi2.toFixed(3)}\n`;
-                    } else if (datasetType === 'cmb') {
-                        perPointSummary += `- Multipole l=${item.multipole}: residual_Dl=${item.residual_Dl.toFixed(3)}, chi2=${item.chi2.toFixed(3)}\n`;
-                    } else if (datasetType === 'sn') {
-                        perPointSummary += `- Supernova ${item.name} at z=${item.redshift.toFixed(3)}: residual_mu=${item.residual_mu.toFixed(4)}, chi2=${item.chi2.toFixed(3)}\n`;
-                    } else if (datasetType === 'lensing') {
-                        perPointSummary += `- Scale k=${item.k_h_Mpc.toFixed(4)} h/Mpc: residual_Pk=${item.residual_Pk.toFixed(5)}, chi2=${item.chi2.toFixed(3)}\n`;
+                perPointSummary = "";
+                for (const [datasetType, cacheList] of Object.entries(perPointDataCache)) {
+                    if (Array.isArray(cacheList) && cacheList.length > 0) {
+                        perPointSummary += `Dataset: ${datasetType.toUpperCase()}\n`;
+                        cacheList.slice(0, 5).forEach(item => {
+                            if (datasetType === 'bao') {
+                                perPointSummary += `- ID ${item.id} (${item.dataset}) at z=${item.redshift.toFixed(3)}: residual=${item.residual.toFixed(5)}, chi2=${item.chi2.toFixed(3)}\n`;
+                            } else if (datasetType === 'cmb') {
+                                perPointSummary += `- Multipole l=${item.multipole}: residual_Dl=${item.residual_Dl.toFixed(3)}, chi2=${item.chi2.toFixed(3)}\n`;
+                            } else if (datasetType === 'sn') {
+                                perPointSummary += `- Supernova ${item.name} at z=${item.redshift.toFixed(3)}: residual_mu=${item.residual_mu.toFixed(4)}, chi2=${item.chi2.toFixed(3)}\n`;
+                            } else if (datasetType === 'lensing') {
+                                perPointSummary += `- Scale k=${item.k_h_Mpc.toFixed(4)} h/Mpc: residual_Pk=${item.residual_Pk.toFixed(5)}, chi2=${item.chi2.toFixed(3)}\n`;
+                            }
+                        });
+                        if (cacheList.length > 5) {
+                            perPointSummary += `- ... (${cacheList.length - 5} more points truncated)\n`;
+                        }
                     }
-                });
-                if (cacheList.length > 8) {
-                    perPointSummary += `- ... (${cacheList.length - 8} more points truncated)\n`;
                 }
             }
 
@@ -1730,6 +1769,13 @@ ${autopsyText}
 - Effective w0 (equation of state at z=0): ${w0Val}
 - Effective wa (EoS crossing slope): ${waVal}
 - Structure Growth Index \u03b30: ${gammaVal}
+- Scalar Field Profile phi(z): ${phiVal}
+
+### Sampler Brain (Proposal Covariance & Correlation Matrix)
+${samplerBrainSummary}
+
+### Boltzmann Solver (CLASS Debug & Error Snippets)
+${classErrorLogsText}
 
 ### Cosmic Tension Dashboard & Discrepancies
 ${tensionVal}

@@ -250,6 +250,7 @@ STRUGGLES_FILE_POSITION = 0
 STRUGGLES_CACHE = {}
 STRUGGLES_RANK_STATE = {}
 STRUGGLES_RANK_TRACEBACK = {}
+CLASS_ERROR_LOGS = []
 
 RAW_FILE_POSITIONS = {}
 BEST_FIT_FILE_CACHE = {}
@@ -317,7 +318,7 @@ def get_best_fit_from_log(log_path):
 
 def extract_model_struggles(log_path):
     """Associates CLASS error tracebacks with subsequent evaluation failures on the same MPI rank."""
-    global STRUGGLES_FILE_POSITION, STRUGGLES_CACHE, STRUGGLES_RANK_STATE, STRUGGLES_RANK_TRACEBACK
+    global STRUGGLES_FILE_POSITION, STRUGGLES_CACHE, STRUGGLES_RANK_STATE, STRUGGLES_RANK_TRACEBACK, CLASS_ERROR_LOGS
     if not log_path or not os.path.exists(log_path):
         return {}
         
@@ -347,7 +348,12 @@ def extract_model_struggles(log_path):
                             STRUGGLES_RANK_TRACEBACK[rank].append(line)
                     elif source == 'model' and "calculation failed" in line.lower():
                         if STRUGGLES_RANK_STATE.get(rank) == 'failed_class':
-                            traceback_text = "".join(STRUGGLES_RANK_TRACEBACK[rank]).lower()
+                            raw_tb = "".join(STRUGGLES_RANK_TRACEBACK[rank]).strip()
+                            if raw_tb and raw_tb not in CLASS_ERROR_LOGS:
+                                CLASS_ERROR_LOGS.append(raw_tb)
+                                if len(CLASS_ERROR_LOGS) > 10:
+                                    CLASS_ERROR_LOGS.pop(0)
+                            traceback_text = raw_tb.lower()
                             
                             if "ncdm" in traceback_text or "neutrino" in traceback_text or "non-cold" in traceback_text:
                                 STRUGGLES_CACHE["NCDM (Massive Neutrinos)"] = STRUGGLES_CACHE.get("NCDM (Massive Neutrinos)", 0) + 1
@@ -751,10 +757,15 @@ def compute_cosmo_curves(best_fit_params):
         c.struct_cleanup()
         c.empty()
         
+        phi_sample = []
+        if '(.)rho_scf' in bg and '(.)p_scf' in bg and 'phi_scf' in bg:
+            phi_sample = phi_interp.tolist()
+            
         return {
             'z': z_sample.tolist(),
             'w': w_sample,
             'mu': mu_sample,
+            'phi': phi_sample,
             'f_sigma8': f_sigma8_arr,
             'w_0': float(w_0),
             'w_a': float(w_a),
@@ -1007,6 +1018,7 @@ async def get_status():
         "cpu_percent": psutil.cpu_percent(),
         "terminal_output": [],
         "external_logs": list(EXTERNAL_LOGS),
+        "class_error_logs": [],
         "watchdog_alerts": WATCHDOG_ALERTS,
         "speed": "-",
         "eta": "-",
@@ -1234,6 +1246,7 @@ async def get_status():
         log_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.log")
         struggles = extract_model_struggles(str(log_file))
         stats_data["struggles"] = struggles
+        stats_data["class_error_logs"] = list(CLASS_ERROR_LOGS)
 
         # Check neutrino sector configuration
         ncdm_mass = None
@@ -2870,11 +2883,16 @@ async def playground_curves(req: PlaygroundRequest):
         except Exception: pass
         raise HTTPException(status_code=500, detail=f"CLASS failed to evaluate PRTOE: {e}")
         
+    phi_sample = []
+    if 'phi_interp' in locals():
+        phi_sample = phi_interp.tolist()
+        
     return {
         "status": "success",
         "z": z_sample.tolist(),
         "w": w_sample,
         "mu": mu_sample,
+        "phi": phi_sample,
         "H_ratio": H_ratio
     }
 
