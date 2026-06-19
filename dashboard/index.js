@@ -38,6 +38,11 @@ const btnResume = document.getElementById('btn-resume');
 const btnStop = document.getElementById('btn-stop');
 const btnDownload = document.getElementById('btn-download');
 
+// Abort confirmation modal elements
+const abortModal = document.getElementById('abort-modal');
+const btnAbortCancel = document.getElementById('btn-abort-cancel');
+const btnAbortConfirm = document.getElementById('btn-abort-confirm');
+
 const statDead = document.getElementById('stat-dead');
 const statEvidence = document.getElementById('stat-evidence');
 const statChi2 = document.getElementById('stat-chi2');
@@ -622,8 +627,24 @@ async function triggerRun(forceOverwrite) {
     }
 }
 
-// Stop Run
-btnStop.addEventListener('click', async () => {
+// Stop Run event listeners
+btnStop.addEventListener('click', () => {
+    abortModal.classList.add('active');
+});
+
+btnAbortCancel.addEventListener('click', () => {
+    abortModal.classList.remove('active');
+});
+
+// Close modal when clicking the overlay backdrop itself
+abortModal.addEventListener('click', (e) => {
+    if (e.target === abortModal) {
+        abortModal.classList.remove('active');
+    }
+});
+
+btnAbortConfirm.addEventListener('click', async () => {
+    abortModal.classList.remove('active');
     btnStop.disabled = true;
     appendLog('Sending termination signal to sampler process group...');
     

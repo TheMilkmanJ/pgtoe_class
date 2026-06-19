@@ -1089,6 +1089,22 @@
             </section>
         </main>
     </div>
+    <!-- Abort Confirmation Modal -->
+    <div id="abort-modal" class="modal-overlay">
+        <div class="modal-box">
+            <div class="modal-title">
+                <span class="warning-icon">⚠️</span> Confirm Abort Run
+            </div>
+            <div class="modal-body">
+                Are you absolutely sure you want to abort the active cosmological sampling run? This will immediately terminate all active processes and any unsaved progress may be lost.
+            </div>
+            <div class="modal-buttons">
+                <button id="btn-abort-cancel" class="btn modal-btn-cancel">No, Keep Running</button>
+                <button id="btn-abort-confirm" class="btn modal-btn-confirm">Yes, Abort Run</button>
+            </div>
+        </div>
+    </div>
+
     <script src="index.js"></script>
 </body>
 </html>
