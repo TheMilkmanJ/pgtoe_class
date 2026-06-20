@@ -847,11 +847,22 @@ async function checkStatus() {
         if (data.log_evidence !== null) {
             const errText = (data.log_evidence_error !== null && data.log_evidence_error !== undefined) ? ` +/- ${data.log_evidence_error.toFixed(2)}` : '';
             statEvidence.textContent = `${data.log_evidence.toFixed(2)}${errText}`;
-            valCustom.textContent = data.log_evidence.toFixed(4);
-            calculateEvidence(data.log_evidence);
+            if (isLcdm) {
+                valBaseline.textContent = data.log_evidence.toFixed(4);
+                valCustom.textContent = "-";
+                valDelta.textContent = "0.0000";
+                jeffreysCard.className = 'jeffreys-card jeffreys-inconclusive';
+                jeffreysText.textContent = 'ΛCDM Baseline Running';
+                jeffreysDesc.textContent = 'Currently running or displaying the standard ΛCDM baseline. Model comparison will activate when a custom model is loaded.';
+            } else {
+                valCustom.textContent = data.log_evidence.toFixed(4);
+                calculateEvidence(data.log_evidence);
+            }
         } else {
             statEvidence.textContent = "-";
-            valCustom.textContent = "-";
+            if (!isLcdm) {
+                valCustom.textContent = "-";
+            }
         }
         
         if (data.best_chi2 !== null && data.best_chi2 !== undefined) {
@@ -1561,14 +1572,10 @@ document.addEventListener('DOMContentLoaded', () => {
             if (!lastStatusData) return;
             const logEvidenceVal = lastStatusData.log_evidence !== null ? `${lastStatusData.log_evidence.toFixed(4)} +/- ${lastStatusData.log_evidence_error.toFixed(4)}` : "-";
             const valBaselineText = document.getElementById('val-baseline').textContent;
-            const valCustomText = document.getElementById('val-custom').textContent;
-            const valDeltaText = document.getElementById('val-delta').textContent;
-            const jeffText = document.getElementById('jeffreys-text').textContent;
-            const jeffDescText = document.getElementById('jeffreys-desc').textContent;
-            
+            const labelCustomText = document.getElementById('label-custom-model').textContent.replace(/:/g, '').trim();
             const text = `--- Bayesian Evidence Comparison ---
 Baseline log(Z): ${valBaselineText}
-Custom Model log(Z): ${valCustomText} (Evidence Z: ${logEvidenceVal})
+${labelCustomText}: ${valCustomText} (Evidence Z: ${logEvidenceVal})
 Delta log(Z): ${valDeltaText}
 Evidence Strength: ${jeffText} (${jeffDescText})`;
             copyToClipboard(text, 'btn-copy-evidence');
