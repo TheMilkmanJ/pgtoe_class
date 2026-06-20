@@ -152,6 +152,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     populateRunsLists();
                 } else if (tabId === 'tab-provenance') {
                     refreshProvenanceLedger();
+                } else if (tabId === 'tab-utils') {
+                    refreshCheckpointsList();
+                    refreshErrorLog();
                 }
             }, 50);
         });
@@ -488,6 +491,28 @@ document.addEventListener('DOMContentLoaded', () => {
             refreshChainQuality();
         });
     }
+
+    // Save Checkpoint Button
+    const btnSaveCheckpoint = document.getElementById('btn-save-checkpoint');
+    if (btnSaveCheckpoint) {
+        btnSaveCheckpoint.addEventListener('click', saveCheckpoint);
+    }
+
+    // Refresh Errors Button
+    const btnRefreshErrors = document.getElementById('btn-refresh-errors');
+    if (btnRefreshErrors) {
+        btnRefreshErrors.addEventListener('click', refreshErrorLog);
+    }
+
+    // Clear Errors Button
+    const btnClearErrors = document.getElementById('btn-clear-errors');
+    if (btnClearErrors) {
+        btnClearErrors.addEventListener('click', clearErrorLog);
+    }
+
+    // Initial load for Checkpoints and Errors
+    refreshCheckpointsList();
+    refreshErrorLog();
 });
 
 function switchToLcdm() {
@@ -3634,6 +3659,181 @@ async function refreshProvenanceLedger() {
         }
     } catch (err) {
         console.error("Error refreshing provenance ledger:", err);
+    }
+}
+
+// --- Checkpoint & Backups Manager ---
+async function refreshCheckpointsList() {
+    const listContainer = document.getElementById('checkpoint-list-container');
+    if (!listContainer) return;
+    try {
+        const response = await fetch(`${API_URL}/api/checkpoints/list`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.status === "success" && data.checkpoints) {
+                if (data.checkpoints.length === 0) {
+                    listContainer.innerHTML = '<div style="color: #a4b0be; text-align: center;">No checkpoints found.</div>';
+                    return;
+                }
+                
+                listContainer.innerHTML = data.checkpoints.map(cp => {
+                    const pctText = cp.percentage !== null ? `${cp.percentage}%` : 'unknown %';
+                    const deadText = cp.dead_points ? `${cp.dead_points} dead pts` : '';
+                    const detail = `${pctText} (${deadText || 'no points'}) - ${cp.created_time}`;
+                    return `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
+                            <div style="display: flex; flex-direction: column; gap: 2px;">
+                                <span style="font-weight: bold; color: #ff9ff3;">${cp.name}</span>
+                                <span style="font-size: 0.7rem; color: #a4b0be;">${detail}</span>
+                            </div>
+                            <button class="btn btn-secondary btn-restore-checkpoint" data-checkpoint="${cp.name}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer; border-radius: 3px;">Restore</button>
+                        </div>
+                    `;
+                }).join('');
+                
+                // Add event listeners to restore buttons
+                listContainer.querySelectorAll('.btn-restore-checkpoint').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const name = btn.getAttribute('data-checkpoint');
+                        restoreCheckpoint(name);
+                    });
+                });
+            }
+        }
+    } catch (err) {
+        console.error("Error listing checkpoints:", err);
+    }
+}
+
+async function saveCheckpoint() {
+    const nameInput = document.getElementById('checkpoint-name-input');
+    const statusMsg = document.getElementById('checkpoint-status-msg');
+    if (!nameInput || !statusMsg) return;
+    
+    const cpName = nameInput.value.trim();
+    if (!cpName) {
+        showCheckpointStatus("Please enter a checkpoint name.", "error");
+        return;
+    }
+    
+    showCheckpointStatus("Creating checkpoint...", "info");
+    
+    try {
+        const response = await fetch(`${API_URL}/api/checkpoints/create`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: cpName,
+                config_name: activeConfig
+            })
+        });
+        
+        const data = await response.json();
+        if (response.ok) {
+            showCheckpointStatus(`Success: ${data.message}`, "success");
+            nameInput.value = '';
+            refreshCheckpointsList();
+        } else {
+            showCheckpointStatus(`Error: ${data.detail || 'Failed to create checkpoint'}`, "error");
+        }
+    } catch (err) {
+        showCheckpointStatus(`Connection error: ${err.message}`, "error");
+    }
+}
+
+async function restoreCheckpoint(name) {
+    const statusMsg = document.getElementById('checkpoint-status-msg');
+    if (!confirm(`Are you absolutely sure you want to restore checkpoint "${name}"? This will overwrite the current active run state configuration/chains!`)) {
+        return;
+    }
+    
+    showCheckpointStatus(`Restoring checkpoint "${name}"...`, "info");
+    
+    try {
+        const response = await fetch(`${API_URL}/api/checkpoints/restore`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: name,
+                config_name: activeConfig
+            })
+        });
+        
+        const data = await response.json();
+        if (response.ok) {
+            showCheckpointStatus(`Success: ${data.message}`, "success");
+            appendLog(`[CHECKPOINT] RESTORED state backup "${name}". The run is ready to resume.`);
+            alert(`Checkpoint "${name}" restored successfully. You can now start/resume the run!`);
+        } else {
+            let errMsg = data.detail;
+            if (typeof data.detail === 'object' && data.detail.differences) {
+                errMsg = `${data.detail.message}\n` + data.detail.differences.map(d => `• ${d}`).join('\n');
+            }
+            showCheckpointStatus(`Restore failed! Mismatch details shown in alert.`, "error");
+            alert(`Restore Mismatch:\n${errMsg}`);
+            appendLog(`[CHECKPOINT] Restore failed for "${name}". Mismatch in parameters/priors.`);
+        }
+    } catch (err) {
+        showCheckpointStatus(`Connection error: ${err.message}`, "error");
+    }
+}
+
+function showCheckpointStatus(msg, type) {
+    const statusMsg = document.getElementById('checkpoint-status-msg');
+    if (!statusMsg) return;
+    statusMsg.textContent = msg;
+    statusMsg.style.display = 'block';
+    if (type === 'success') {
+        statusMsg.style.background = 'rgba(46, 204, 113, 0.15)';
+        statusMsg.style.color = '#2ecc71';
+        statusMsg.style.border = '1px solid rgba(46, 204, 113, 0.3)';
+    } else if (type === 'error') {
+        statusMsg.style.background = 'rgba(231, 76, 60, 0.15)';
+        statusMsg.style.color = '#e74c3c';
+        statusMsg.style.border = '1px solid rgba(231, 76, 60, 0.3)';
+    } else {
+        statusMsg.style.background = 'rgba(52, 152, 219, 0.15)';
+        statusMsg.style.color = '#3498db';
+        statusMsg.style.border = '1px solid rgba(52, 152, 219, 0.3)';
+    }
+}
+
+// --- Dashboard & CLASS Error Log Viewer ---
+async function refreshErrorLog() {
+    const errorBody = document.getElementById('error-log-body');
+    if (!errorBody) return;
+    
+    try {
+        const response = await fetch(`${API_URL}/api/dashboard_errors`);
+        if (response.ok) {
+            const data = await response.json();
+            if (data.status === "success" && data.errors) {
+                if (data.errors.length === 0) {
+                    errorBody.innerHTML = 'No errors logged yet. System is stable.';
+                    errorBody.style.color = '#2ecc71';
+                    return;
+                }
+                errorBody.innerHTML = data.errors.join('\n');
+                errorBody.style.color = '#ff6b6b';
+            }
+        }
+    } catch (err) {
+        console.error("Error fetching error logs:", err);
+    }
+}
+
+async function clearErrorLog() {
+    if (!confirm("Are you sure you want to clear the error logs?")) return;
+    try {
+        const response = await fetch(`${API_URL}/api/clear_dashboard_errors`, {
+            method: 'POST'
+        });
+        if (response.ok) {
+            appendLog(`[ERRORS] Error log cleared successfully.`);
+            refreshErrorLog();
+        }
+    } catch (err) {
+        console.error("Error clearing error logs:", err);
     }
 }
 

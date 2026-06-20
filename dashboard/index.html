@@ -710,6 +710,42 @@
                             🎬 Compile and Download Evolution GIF
                         </button>
                     </div>
+
+                    <!-- Checkpoint Manager Card -->
+                    <div class="evidence-math" style="margin-top: 15px;">
+                        <div class="jeffreys-title">Run Checkpoints &amp; Resuming</div>
+                        <p style="font-size: 0.72rem; color: #a4b0be; margin-bottom: 10px;">
+                            Back up your active run state at a specific percentage. You can restore this checkpoint to resume from that exact percentage, provided the priors and parameters are unchanged.
+                        </p>
+                        
+                        <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+                            <input type="text" id="checkpoint-name-input" placeholder="Checkpoint name (e.g. half_done)" style="flex: 1; padding: 6px 10px; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff; font-size: 0.8rem; outline: none; font-family: var(--font-mono);">
+                            <button class="btn btn-glow" id="btn-save-checkpoint" style="background: linear-gradient(135deg, #3867d6, #45aaf2); border: none; padding: 6px 12px; font-size: 0.8rem; color:#fff; cursor: pointer; border-radius: 4px;">Save</button>
+                        </div>
+                        
+                        <div id="checkpoint-status-msg" style="font-size: 0.75rem; display: none; margin-bottom: 10px; padding: 6px 10px; border-radius: 4px; font-family: var(--font-mono);"></div>
+                        
+                        <div id="checkpoint-list-container" style="max-height: 200px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); font-family: var(--font-mono); font-size: 0.78rem; display: flex; flex-direction: column; gap: 6px; padding: 8px;">
+                            <div style="color: #a4b0be; text-align: center;">No checkpoints found.</div>
+                        </div>
+                    </div>
+
+                    <!-- Dashboard / CLASS Error Log Card -->
+                    <div class="evidence-math" style="margin-top: 15px;">
+                        <div class="jeffreys-title">Dashboard &amp; CLASS Error Log</div>
+                        <p style="font-size: 0.72rem; color: #a4b0be; margin-bottom: 10px;">
+                            Detailed exceptions, theory code fails, stability scan crashes, and backend server warning logs.
+                        </p>
+                        
+                        <div id="error-log-body" style="max-height: 180px; overflow-y: auto; background: rgba(0,0,0,0.4); border-radius: 4px; padding: 10px; border: 1px solid rgba(255,255,255,0.05); font-family: var(--font-mono); font-size: 0.75rem; color: #ff6b6b; white-space: pre-wrap; margin-bottom: 8px; line-height: 1.3;">
+                            No errors logged yet.
+                        </div>
+                        
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-secondary" id="btn-refresh-errors" style="flex: 1; padding: 6px 10px; font-size: 0.8rem; background: rgba(255,255,255,0.08); color: #fff; border: 1px solid rgba(255,255,255,0.1); cursor: pointer; border-radius: 4px; transition: all 0.2s;">🔄 Refresh</button>
+                            <button class="btn btn-secondary" id="btn-clear-errors" style="flex: 1; padding: 6px 10px; font-size: 0.8rem; cursor: pointer; border-radius: 4px;">Clear Log</button>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Tab 10: Run Autopsy, Residuals Explorer & Replay -->

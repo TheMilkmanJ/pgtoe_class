@@ -18,6 +18,17 @@ from typing import List, Optional
 import asyncio
 import math
 
+ERROR_LOG_PATH = Path("chains/dashboard_errors.log")
+
+def log_dashboard_error(msg: str):
+    try:
+        ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(ERROR_LOG_PATH, 'a') as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass
+
 # --- Globals ---
 # This will hold the subprocess.Popen object of the running Cobaya job
 RUNNING_PROCESS = None
@@ -53,8 +64,8 @@ import secrets
 security = HTTPBasic()
 
 def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
-    required_user = os.environ.get("DASHBOARD_USER", "TheMilkmanJ")
-    required_pass = os.environ.get("DASHBOARD_PASS", "Freemilk420!")
+    required_user = os.environ.get("DASHBOARD_USER", "CosmicExplorer")
+    required_pass = os.environ.get("DASHBOARD_PASS", "theuniverse")
     
     correct_username = secrets.compare_digest(credentials.username, required_user)
     correct_password = secrets.compare_digest(credentials.password, required_pass)
@@ -4343,6 +4354,312 @@ async def get_provenance_ledger(config_name: str = "uploaded_config.yaml"):
             "ram_gb": round(psutil.virtual_memory().total / (1024**3), 1)
         }
     }
+
+# --- Checkpoint Management System for Run Resuming ---
+class CheckpointSaveRequest(BaseModel):
+    name: str
+    config_name: str = "uploaded_config.yaml"
+
+class CheckpointRestoreRequest(BaseModel):
+    name: str
+    config_name: str = "uploaded_config.yaml"
+
+def check_config_compatibility(current_path: Path, checkpoint_path: Path):
+    try:
+        with open(current_path, 'r') as f:
+            curr = yaml.safe_load(f) or {}
+        with open(checkpoint_path, 'r') as f:
+            check = yaml.safe_load(f) or {}
+    except Exception as e:
+        return False, [f"Failed to parse configuration files: {e}"]
+
+    diffs = []
+    
+    def check_values_equal(v1, v2):
+        if type(v1) != type(v2):
+            try:
+                if abs(float(v1) - float(v2)) < 1e-9:
+                    return True
+            except (ValueError, TypeError):
+                pass
+            return False
+        if isinstance(v1, dict):
+            if set(v1.keys()) != set(v2.keys()):
+                return False
+            for k in v1:
+                if not check_values_equal(v1[k], v2[k]):
+                    return False
+            return True
+        if isinstance(v1, list):
+            if len(v1) != len(v2):
+                return False
+            for a, b in zip(v1, v2):
+                if not check_values_equal(a, b):
+                    return False
+            return True
+        if isinstance(v1, (int, float)):
+            return abs(v1 - v2) < 1e-9
+        return v1 == v2
+
+    # Compare likelihoods
+    curr_lik = curr.get("likelihood", {})
+    check_lik = check.get("likelihood", {})
+    if not check_values_equal(curr_lik, check_lik):
+        for k in set(curr_lik.keys()) | set(check_lik.keys()):
+            if k not in curr_lik:
+                diffs.append(f"Likelihood '{k}' was removed in current config.")
+            elif k not in check_lik:
+                diffs.append(f"Likelihood '{k}' was added in current config.")
+            elif not check_values_equal(curr_lik[k], check_lik[k]):
+                diffs.append(f"Likelihood '{k}' configuration changed.")
+
+    # Compare theory
+    curr_theory = curr.get("theory", {})
+    check_theory = check.get("theory", {})
+    if not check_values_equal(curr_theory, check_theory):
+        for k in set(curr_theory.keys()) | set(check_theory.keys()):
+            if k not in curr_theory:
+                diffs.append(f"Theory module '{k}' was removed in current config.")
+            elif k not in check_theory:
+                diffs.append(f"Theory module '{k}' was added in current config.")
+            elif not check_values_equal(curr_theory[k], check_theory[k]):
+                diffs.append(f"Theory module '{k}' options changed.")
+
+    # Compare params
+    curr_params = curr.get("params", {})
+    check_params = check.get("params", {})
+    if not check_values_equal(curr_params, check_params):
+        for p in set(curr_params.keys()) | set(check_params.keys()):
+            if p not in curr_params:
+                diffs.append(f"Parameter '{p}' was removed in current config.")
+            elif p not in check_params:
+                diffs.append(f"Parameter '{p}' was added in current config.")
+            elif not check_values_equal(curr_params[p], check_params[p]):
+                diffs.append(f"Parameter '{p}' definition changed.")
+
+    # Compare sampler
+    curr_sampler = curr.get("sampler", {})
+    check_sampler = check.get("sampler", {})
+    if not check_values_equal(curr_sampler, check_sampler):
+        for s in set(curr_sampler.keys()) | set(check_sampler.keys()):
+            if s not in curr_sampler:
+                diffs.append(f"Sampler '{s}' was removed in current config.")
+            elif s not in check_sampler:
+                diffs.append(f"Sampler '{s}' was added in current config.")
+            elif not check_values_equal(curr_sampler[s], check_sampler[s]):
+                diffs.append(f"Sampler '{s}' settings changed.")
+
+    return (len(diffs) == 0, diffs)
+
+@app.post("/api/checkpoints/create")
+async def create_checkpoint(req: CheckpointSaveRequest):
+    global CURRENT_STATUS
+    config_file = Path(req.config_name)
+    if not config_file.exists():
+        raise HTTPException(status_code=404, detail=f"Configuration file '{req.config_name}' not found.")
+
+    prefix = get_output_prefix_from_yaml(str(config_file))
+    prefix_path = Path(prefix)
+    prefix_dir = prefix_path.parent
+    prefix_base = prefix_path.name
+
+    prefix_files = list(prefix_dir.glob(f"{prefix_base}*"))
+    if not prefix_files:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"No active or past run files found for prefix '{prefix}'."
+        )
+
+    clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '', req.name)
+    if not clean_name:
+        raise HTTPException(status_code=400, detail="Invalid checkpoint name.")
+
+    checkpoint_dir = Path("chains/checkpoints") / clean_name
+    if checkpoint_dir.exists():
+        try:
+            shutil.rmtree(checkpoint_dir)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Failed to clear existing checkpoint: {e}"
+            )
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        for f in prefix_files:
+            dest = checkpoint_dir / f.name
+            if f.is_dir():
+                shutil.copytree(f, dest)
+            else:
+                shutil.copy2(f, dest)
+        shutil.copy2(config_file, checkpoint_dir / "config_saved.yaml")
+    except Exception as e:
+        if checkpoint_dir.exists():
+            shutil.rmtree(checkpoint_dir)
+        log_dashboard_error(f"Failed to copy checkpoint files for '{clean_name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to copy checkpoint files: {e}")
+
+    return {
+        "status": "success",
+        "message": f"Checkpoint '{clean_name}' created successfully."
+    }
+
+@app.get("/api/checkpoints/list")
+async def list_checkpoints():
+    checkpoints_parent = Path("chains/checkpoints")
+    if not checkpoints_parent.exists():
+        return {"status": "success", "checkpoints": []}
+    
+    checkpoints = []
+    for d in checkpoints_parent.iterdir():
+        if d.is_dir():
+            saved_config = d / "config_saved.yaml"
+            prefix = "Unknown"
+            percentage = None
+            dead_points = 0
+            if saved_config.exists():
+                prefix = get_output_prefix_from_yaml(str(saved_config))
+                prefix_base = Path(prefix).name
+                resume_file = d / f"{prefix_base}_polychord_raw" / f"{prefix_base}.resume"
+                stats_file = d / f"{prefix_base}.stats"
+                if not stats_file.exists():
+                    stats_file = d / f"{prefix_base}_polychord_raw" / f"{prefix_base}.stats"
+                
+                stats = parse_polychord_stats(stats_file, resume_file)
+                dead_points = stats.get("dead_points", 0)
+                if dead_points > 0:
+                    percentage = round(min(100.0, (dead_points / 3000.0) * 100), 1)
+
+            checkpoints.append({
+                "name": d.name,
+                "prefix": prefix,
+                "dead_points": dead_points,
+                "percentage": percentage,
+                "created_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(d.stat().st_mtime))
+            })
+            
+    checkpoints.sort(key=lambda x: x["name"])
+    return {
+        "status": "success",
+        "checkpoints": checkpoints
+    }
+
+@app.post("/api/checkpoints/restore")
+async def restore_checkpoint(req: CheckpointRestoreRequest):
+    global CURRENT_STATUS, RUNNING_PROCESS
+    
+    if CURRENT_STATUS == "running" or (RUNNING_PROCESS and RUNNING_PROCESS.poll() is None):
+        raise HTTPException(
+            status_code=409, 
+            detail="A run is currently in progress. Please stop the run before restoring a checkpoint."
+        )
+
+    config_file = Path(req.config_name)
+    if not config_file.exists():
+        raise HTTPException(status_code=404, detail=f"Configuration file '{req.config_name}' not found.")
+
+    clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '', req.name)
+    checkpoint_dir = Path("chains/checkpoints") / clean_name
+    if not checkpoint_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Checkpoint '{req.name}' does not exist.")
+
+    saved_config = checkpoint_dir / "config_saved.yaml"
+    if not saved_config.exists():
+        raise HTTPException(
+            status_code=400, 
+            detail="Checkpoint does not contain config_saved.yaml."
+        )
+
+    is_compatible, diffs = check_config_compatibility(config_file, saved_config)
+    if not is_compatible:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Configuration mismatch! Cannot restore checkpoint.",
+                "differences": diffs
+            }
+        )
+
+    curr_prefix = get_output_prefix_from_yaml(str(config_file))
+    curr_prefix_path = Path(curr_prefix)
+    curr_prefix_dir = curr_prefix_path.parent
+    curr_prefix_base = curr_prefix_path.name
+
+    check_prefix = get_output_prefix_from_yaml(str(saved_config))
+    check_prefix_path = Path(check_prefix)
+    check_prefix_base = check_prefix_path.name
+
+    curr_files = list(curr_prefix_dir.glob(f"{curr_prefix_base}*"))
+    for f in curr_files:
+        try:
+            if f.is_dir():
+                shutil.rmtree(f)
+            else:
+                f.unlink()
+        except Exception as e:
+            print(f"Warning: Could not clean up file {f}: {e}")
+
+    try:
+        for f in checkpoint_dir.iterdir():
+            if f.name == "config_saved.yaml":
+                continue
+            
+            new_name = f.name.replace(check_prefix_base, curr_prefix_base)
+            dest = curr_prefix_dir / new_name
+            
+            if f.is_dir():
+                dest.mkdir(parents=True, exist_ok=True)
+                for root, dirs, files in os.walk(f):
+                    rel_root = os.path.relpath(root, f)
+                    if rel_root == ".":
+                        target_root = dest
+                    else:
+                        target_root = dest / rel_root
+                    
+                    for d in dirs:
+                        (target_root / d).mkdir(parents=True, exist_ok=True)
+                        
+                    for file_name in files:
+                        source_file = Path(root) / file_name
+                        new_file_name = file_name.replace(check_prefix_base, curr_prefix_base)
+                        shutil.copy2(source_file, target_root / new_file_name)
+            else:
+                shutil.copy2(f, dest)
+                
+    except Exception as e:
+        log_dashboard_error(f"Failed to restore checkpoint files for '{clean_name}': {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to restore checkpoint files: {e}"
+        )
+
+    return {
+        "status": "success",
+        "message": f"Checkpoint '{clean_name}' restored successfully as '{curr_prefix_base}'. You can now resume the run."
+    }
+
+@app.get("/api/dashboard_errors")
+async def get_dashboard_errors():
+    if not ERROR_LOG_PATH.exists():
+        return {"status": "success", "errors": []}
+    try:
+        with open(ERROR_LOG_PATH, 'r') as f:
+            lines = [line.strip() for line in f.readlines()[-100:]]
+        return {"status": "success", "errors": lines}
+    except Exception as e:
+        log_dashboard_error(f"Error reading dashboard error log: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/api/clear_dashboard_errors")
+async def clear_dashboard_errors():
+    try:
+        if ERROR_LOG_PATH.exists():
+            ERROR_LOG_PATH.unlink()
+        return {"status": "success", "message": "Error log cleared."}
+    except Exception as e:
+        log_dashboard_error(f"Error clearing dashboard error log: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- Serve Dashboard UI ---
 if Path("dashboard").exists():
