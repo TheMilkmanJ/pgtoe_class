@@ -54,12 +54,13 @@ cropped.save(dest_ico, format='ICO', sizes=ico_sizes)
 print(f"Saved transparent ICO at: {dest_ico}")
 
 # Copy the updated transparent ICO to the local Windows user directory
-windows_app_dir = Path("/mnt/c/Users/themi/.cosmic_dashboard")
-if windows_app_dir.exists():
+windows_app_dir = Path("/mnt/c/Users/themi/CosmicDashboardAssets")
+try:
+    windows_app_dir.mkdir(parents=True, exist_ok=True)
     local_win_ico = windows_app_dir / "galaxy_icon.ico"
     shutil.copy(dest_ico, local_win_ico)
     print(f"Successfully copied transparent icon to Windows: {local_win_ico}")
-else:
-    print("Windows destination directory not found, skipping copy.")
+except Exception as e:
+    print(f"Failed to copy icon to Windows directory: {e}")
 
 print("Galaxy icon background trim complete!")
