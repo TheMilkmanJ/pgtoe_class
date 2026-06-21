@@ -36,6 +36,17 @@ The absolute easiest way to run CosmicDashboard is using Docker. We have include
 
 *Note: The first time you run this, it will take a few minutes to download the compilers and build the CLASS engine. All your expensive nested sampling data will be safely saved to your local `/chains` folder, meaning you never lose your data even when you close the dashboard!*
 
+### 🌌 Galactic Desktop Shortcut (One-Click Dashboard Launch)
+We have added a custom desktop shortcut featuring a high-fidelity glowing spiral galaxy icon for both Windows and Linux:
+- **Windows:** Launches the dashboard web UI from your desktop with a custom ICO icon accessed from WSL via UNC path (`\\wsl.localhost\Ubuntu\...`).
+- **Linux:** Adds a standard `.desktop` application shortcut utilizing a PNG format galaxy icon.
+
+To manually recreate or redeploy this shortcut, run:
+```bash
+conda activate pgtoe_gold
+python scripts/create_desktop_shortcut.py
+```
+
 ### Manual Docker Commands (Alternative)
 If you prefer to run it manually without the launch scripts:
 ```bash
