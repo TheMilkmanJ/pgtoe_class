@@ -4,30 +4,12 @@ import shutil
 from pathlib import Path
 
 # Paths
-brain_icon_path = Path("/home/themilkmanj/.gemini/antigravity-cli/brain/b4347940-5161-49a3-9ee0-e399644fbc4d/galaxy_icon_1782009640905.jpg")
 project_dir = Path("/home/themilkmanj/prtoe_class")
 assets_dir = project_dir / "dashboard" / "assets"
 assets_dir.mkdir(parents=True, exist_ok=True)
 
-dest_jpg = assets_dir / "galaxy_icon.jpg"
 dest_ico = assets_dir / "galaxy_icon.ico"
 dest_png = assets_dir / "galaxy_icon.png"
-
-print("Copying icon to project directory...")
-shutil.copy(brain_icon_path, dest_jpg)
-
-# Convert to ICO and PNG using PIL
-try:
-    from PIL import Image
-    print("Converting icon to ICO and PNG formats...")
-    img = Image.open(dest_jpg)
-    img.save(dest_png, format="PNG")
-    # Convert and resize to standard icon size (256x256)
-    icon_img = img.resize((256, 256))
-    icon_img.save(dest_ico, format="ICO")
-    print("Icon formats generated successfully.")
-except Exception as e:
-    print(f"PIL conversion failed: {e}. Shortcut will fall back to using default browser icon.")
 
 # 1. Create Windows Desktop Shortcut (.url file)
 # WSL maps the C drive to /mnt/c
