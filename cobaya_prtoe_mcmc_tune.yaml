@@ -1,13 +1,5 @@
-# ==============================================================================
-# MCMC TUNING CONFIGURATION FOR PRTOE (FAST COVARIANCE ESTIMATION)
-# ==============================================================================
-
-debug: True
-
-# Change output path to avoid overwriting your PolyChord chains
+debug: true
 output: chains/prtoe_mcmc_tune
-
-# 1. Likelihoods (CMB, BAO, and Supernovae/SH0ES)
 likelihood:
   planck_2018_lowl.TT: null
   planck_2018_lowl.EE: null
@@ -18,41 +10,47 @@ likelihood:
   bao.sdss_dr12_consensus_final: null
   bao.desi_2024_bao_all: null
   sn.pantheonplusshoes: null
-
-# 2. Theory Provider (Custom CLASS Wrapper with Fast-Precision Settings)
 theory:
   classy:
-    stop_at_error: False
+    stop_at_error: false
     extra_args:
       use_prtoe: 'yes'
       non_linear: halofit
+      base_path: /home/themilkmanj/prtoe_class
       gauge: newtonian
-      hyper_flat_approximation_nu: 7000.
+      hyper_flat_approximation_nu: 7000.0
       transfer_neglect_delta_k_S_t0: 0.17
       transfer_neglect_delta_k_S_t1: 0.05
       transfer_neglect_delta_k_S_t2: 0.17
       transfer_neglect_delta_k_S_e: 0.13
       delta_l_max: 1000
-
-# 3. Parameter Dictionary (Priors and Constraints)
+    path: /home/themilkmanj/prtoe_class
 params:
   omega_b:
-    prior: {min: 0.0215, max: 0.0235}
+    prior:
+      min: 0.0215
+      max: 0.0235
     ref: 0.0224
     proposal: 0.0001
     latex: \Omega_\mathrm{b} h^2
   omega_cdm:
-    prior: {min: 0.115, max: 0.125}
-    ref: 0.120
+    prior:
+      min: 0.115
+      max: 0.125
+    ref: 0.12
     proposal: 0.001
     latex: \Omega_\mathrm{c} h^2
   H0:
-    prior: {min: 62.0, max: 78.0}
+    prior:
+      min: 62.0
+      max: 78.0
     ref: 67.4
     proposal: 0.5
     latex: H_0
   logA:
-    prior: {min: 2.95, max: 3.15}
+    prior:
+      min: 2.95
+      max: 3.15
     ref: 3.05
     proposal: 0.005
     latex: \ln(10^{10} A_\mathrm{s})
@@ -60,17 +58,24 @@ params:
   A_s:
     value: 'lambda logA: 1e-10 * np.exp(logA)'
   n_s:
-    prior: {min: 0.94, max: 0.99}
+    prior:
+      min: 0.94
+      max: 0.99
     ref: 0.965
     proposal: 0.003
     latex: n_\mathrm{s}
   z_reio:
-    prior: {min: 6.0, max: 10.0}
+    prior:
+      min: 6.0
+      max: 10.0
     ref: 8.0
     proposal: 0.1
     latex: z_\mathrm{reio}
   A_planck:
-    prior: {dist: norm, loc: 1.0, scale: 0.0025}
+    prior:
+      dist: norm
+      loc: 1.0
+      scale: 0.0025
     ref: 1.0
     proposal: 0.00025
     latex: A_\mathrm{planck}
@@ -79,17 +84,26 @@ params:
   m_prtoe:
     value: 0.05
   delta_prtoe:
-    prior: {min: 0.001, max: 0.2}
+    prior:
+      min: 0.001
+      max: 0.2
     ref: 0.048
     proposal: 0.01
     latex: \Delta
   xi_prtoe:
-    prior: {min: 1.0e-7, max: 1.2e-5}
-    ref: {dist: norm, loc: 5.0e-6, scale: 1.0e-6}
-    proposal: 1.0e-6
+    prior:
+      min: 1.0e-07
+      max: 1.2e-05
+    ref:
+      dist: norm
+      loc: 5.0e-06
+      scale: 1.0e-06
+    proposal: 1.0e-06
     latex: \xi
   log_beta_prtoe:
-    prior: {min: -12.0, max: -2.0}
+    prior:
+      min: -12.0
+      max: -2.0
     ref: -6.0
     proposal: 0.1
     latex: \log_{10}(\beta_\mathrm{prtoe})
@@ -101,25 +115,18 @@ params:
     value: 'lambda omega_b, omega_cdm, H0: 1.0 - (omega_b + omega_cdm) / (H0/100.0)**2'
     latex: V_{0,\mathrm{prtoe}}
   zeta_prtoe:
-    prior: {min: 0.0001, max: 5.0}
+    prior:
+      min: 0.0001
+      max: 5.0
     ref: 0.1
     proposal: 0.05
     latex: \zeta_\mathrm{prtoe}
-
-# 4. Sampler Configuration (MCMC with covariance learning)
 sampler:
   mcmc:
-    # We want it to learn the covariance matrix of the parameters
-    learn_proposal: True
-    # Stop when the Gelman-Rubin convergence statistic R-1 is below 0.01 
-    # (A bit loose, but perfectly fine for getting a tuning covariance matrix)
-    Rminus1_stop: 0.01 
-    # Also track and print convergence of the variance within individual chains
+    learn_proposal: true
+    Rminus1_stop: 0.01
     Rminus1_single_split: 4
-    # Force a fixed small burn-in instead of letting it discard 50% of the chain
     burn_in: 50
-    # Allow updating the proposal covariance matrix even when R-1 is currently very high
     learn_proposal_Rminus1_max: 50.0
     learn_proposal_Rminus1_max_early: 100.0
-    # Hard limit on samples so it doesn't run forever if it struggles
     max_samples: 5000

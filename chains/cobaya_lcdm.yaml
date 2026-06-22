@@ -1,11 +1,11 @@
 theory:
   classy:
-    path: 
+    path: /home/themilkmanj/prtoe_class
     stop_at_error: false
     extra_args:
       use_prtoe: 'no'
       non_linear: halofit
-      base_path: 
+      base_path: /home/themilkmanj/prtoe_class
       gauge: newtonian
       hyper_flat_approximation_nu: 7000.0
       transfer_neglect_delta_k_S_t0: 0.17
@@ -82,4 +82,4 @@ sampler:
     nlive: 200
     num_repeats: 20
 output: lcdm_poly
-packages_path: 
+packages_path: null

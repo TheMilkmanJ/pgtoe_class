@@ -1307,8 +1307,12 @@ btnAbortConfirm.addEventListener('click', async () => {
         });
         const data = await response.json();
         if (response.ok) {
-            appendLog('Process group stopped successfully.');
-            checkStatus();
+            appendLog('Abort signal sent. For mpirun/Cobaya runs the process tree may take a few seconds to fully die (MPI ranks, workers). Dashboard state updated immediately; status will reflect "stopped" shortly.');
+            // Force local button disabled + optimistic status
+            btnStop.disabled = true;
+            // Poll a couple times quickly
+            setTimeout(checkStatus, 800);
+            setTimeout(checkStatus, 2500);
         } else {
             appendLog(`Failed to stop process: ${data.detail}`);
             btnStop.disabled = false;

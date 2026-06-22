@@ -17,7 +17,7 @@ theory:
     extra_args:
       use_prtoe: 'yes'
       non_linear: halofit
-      base_path: null
+      base_path: /home/themilkmanj/prtoe_class
 params:
   omega_b:
     prior:
@@ -72,35 +72,35 @@ params:
     ref: 1.0
     proposal: 0.00025
     latex: A_\mathrm{planck}
-  prtoe_xi:
+  xi_prtoe:
     prior:
-      min: 1.0e-09
-      max: 1.0e-05
+      min: 1.0e-07
+      max: 1.2e-05
     ref: 1.0e-07
     proposal: 1.0e-08
     latex: \xi_\mathrm{prtoe}
-  prtoe_beta:
+  beta_prtoe:
     prior:
       min: 0.0
       max: 0.0001
     ref: 1.0e-06
     proposal: 1.0e-07
     latex: \beta_\mathrm{prtoe}
-  prtoe_lambda:
+  lambda_prtoe:
     prior:
       min: 0.0
       max: 1.0
     ref: 0.1
     proposal: 0.01
     latex: \lambda_\mathrm{prtoe}
-  prtoe_mass:
+  m_prtoe:
     prior:
       min: 1.0e-22
       max: 1.0e-19
     ref: 1.0e-20
     proposal: 1.0e-21
     latex: m_\mathrm{prtoe}
-  prtoe_v0:
+  V0_prtoe:
     prior:
       min: 0.0
       max: 2.0

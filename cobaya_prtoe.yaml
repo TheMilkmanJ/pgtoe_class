@@ -1,14 +1,5 @@
-# ==============================================================================
-# COBAYA INPUT CONFIGURATION FOR PRTOE + POLYCHORD
-# ==============================================================================
-
-# Enable top-level debug logging for full traceback output
-debug: True
-
-# Top-level output directory and prefix for chains
+debug: true
 output: chains/prtoe_poly
-
-# 1. Likelihoods (CMB, BAO, and Supernovae/SH0ES)
 likelihood:
   planck_2018_lowl.TT: null
   planck_2018_lowl.EE: null
@@ -19,20 +10,15 @@ likelihood:
   bao.sdss_dr12_consensus_final: null
   bao.desi_2024_bao_all: null
   sn.pantheonplusshoes: null
-
-# 2. Theory Provider (Custom CLASS Wrapper)
 theory:
   classy:
-    path: 
-    stop_at_error: False
+    path: /home/themilkmanj/prtoe_class
+    stop_at_error: false
     extra_args:
       use_prtoe: 'yes'
       non_linear: halofit
-      base_path: 
-
-# 3. Parameter Dictionary (Priors and Constraints)
+      base_path: /home/themilkmanj/prtoe_class
 params:
-  # --- Standard Cosmological Parameters ---
   omega_b:
     prior:
       min: 0.019
@@ -42,9 +28,9 @@ params:
     latex: \Omega_\mathrm{b} h^2
   omega_cdm:
     prior:
-      min: 0.10
-      max: 0.20
-    ref: 0.120
+      min: 0.1
+      max: 0.2
+    ref: 0.12
     proposal: 0.001
     latex: \Omega_\mathrm{c} h^2
   H0:
@@ -71,8 +57,6 @@ params:
     ref: 0.965
     proposal: 0.005
     latex: n_\mathrm{s}
-  
-  # --- Sample z_reio directly to avoid unstable tau_reio shooting ---
   z_reio:
     prior:
       min: 5.0
@@ -80,8 +64,6 @@ params:
     ref: 8.0
     proposal: 0.1
     latex: z_\mathrm{reio}
-
-  # --- Planck Nuisance Parameter for Lite Likelihood ---
   A_planck:
     prior:
       dist: norm
@@ -90,46 +72,42 @@ params:
     ref: 1.0
     proposal: 0.00025
     latex: A_\mathrm{planck}
-
-  # --- Custom PRTOE Model Parameters ---
-  prtoe_xi:
+  xi_prtoe:
     prior:
-      min: 1.0e-9
-      max: 1.0e-5
-    ref: 1.0e-7
-    proposal: 1.0e-8
+      min: 1.0e-07
+      max: 1.2e-05
+    ref: 1.0e-07
+    proposal: 1.0e-08
     latex: \xi_\mathrm{prtoe}
-  prtoe_beta:
+  beta_prtoe:
     prior:
       min: 0.0
-      max: 1.0e-4
-    ref: 1.0e-6
-    proposal: 1.0e-7
+      max: 0.0001
+    ref: 1.0e-06
+    proposal: 1.0e-07
     latex: \beta_\mathrm{prtoe}
-  prtoe_lambda:
+  lambda_prtoe:
     prior:
       min: 0.0
       max: 1.0
-    ref: 0.10
+    ref: 0.1
     proposal: 0.01
     latex: \lambda_\mathrm{prtoe}
-  prtoe_mass:
+  m_prtoe:
     prior:
       min: 1.0e-22
       max: 1.0e-19
     ref: 1.0e-20
     proposal: 1.0e-21
     latex: m_\mathrm{prtoe}
-  prtoe_v0:
+  V0_prtoe:
     prior:
       min: 0.0
       max: 2.0
     ref: 0.685
     proposal: 0.05
     latex: v_{0,\mathrm{prtoe}}
-
-# 4. Sampler Configuration (PolyChord Nested Sampler)
 sampler:
   polychord:
-    nlive: 250                # Number of live points (adjust based on speed vs precision)
-    num_repeats: 30            # Number of repeats for reliability in degenerated spaces
+    nlive: 250
+    num_repeats: 30
