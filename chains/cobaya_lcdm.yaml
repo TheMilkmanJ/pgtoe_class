@@ -4,6 +4,7 @@ theory:
     stop_at_error: false
     extra_args:
       use_prtoe: 'no'
+      non_linear: halofit
       base_path: 
       gauge: newtonian
       hyper_flat_approximation_nu: 7000.0

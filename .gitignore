@@ -32,3 +32,23 @@ run.log
 chains/*_poly*
 chains/*.log
 chains/*.locked
+
+# CosmicDashboard / build hygiene (audit)
+dist/
+*.zip
+dashboard/history/
+__pycache__/
+*.egg
+prtoe_class/
+chains/dashboard_backups/
+chains/*.yaml
+chains/*.txt
+chains/*.resume
+chains/*.stats
+*.png
+scripts/__pycache__/
+*.dat
+stXk34nG
+CosmicDashboard_Data.zip
+prtoe_posteriors.png
+# Note: repo intentionally does not track build products, run data, or generated chains for portability and size.

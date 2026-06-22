@@ -16,8 +16,19 @@ if %errorlevel% neq 0 (
 echo Building Docker container (this may take a few minutes the first time)...
 docker build -t cosmic-dashboard .
 
-echo Opening Dashboard in your browser...
-start dashboard\index.html
+echo.
+echo Starting the CosmicDashboard container on http://localhost:8000 ...
+docker run --rm --name cosmic-dashboard -p 8000:8000 -v "%cd%\chains:/app/chains" cosmic-dashboard
+
+echo.
+echo IMPORTANT: Open this in your browser for best results (avoids file:// auth issues):
+echo     http://localhost:8000
+echo.
+echo If it prompts for login, use the DASHBOARD_USER / DASHBOARD_PASS you set
+echo (or the ones printed by the backend on first start).
+echo.
+echo (To stop: Ctrl+C in this window or close the container.)
+pause
 
 echo Starting backend server (Press Ctrl+C or close this window to stop)...
 docker stop cosmic-backend >nul 2>&1

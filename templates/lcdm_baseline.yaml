@@ -21,6 +21,7 @@ theory:
     stop_at_error: False
     extra_args:
       use_prtoe: 'no'
+      non_linear: halofit
       N_ur: 2.0328
       N_ncdm: 1
       T_ncdm: 0.71611

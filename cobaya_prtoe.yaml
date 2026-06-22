@@ -27,6 +27,7 @@ theory:
     stop_at_error: False
     extra_args:
       use_prtoe: 'yes'
+      non_linear: halofit
       base_path: 
 
 # 3. Parameter Dictionary (Priors and Constraints)

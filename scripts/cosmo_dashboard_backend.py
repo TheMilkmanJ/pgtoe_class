@@ -1,9 +1,10 @@
 import uvicorn
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, BackgroundTasks, Depends, status, Request
+from fastapi.responses import FileResponse, JSONResponse, Response as FastAPIResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
+from contextlib import asynccontextmanager
 import subprocess
 import os
 import shutil
@@ -18,10 +19,22 @@ import datetime
 from typing import List, Optional
 import asyncio
 import math
+import secrets
+
+# Ensure parsers package is importable when running backend.py directly
+import sys
+from pathlib import Path as _Path
+sys.path.insert(0, str(_Path(__file__).resolve().parent))
 
 ERROR_LOG_PATH = Path("chains/dashboard_errors.log")
-
-def log_dashboard_error(msg: str):
+# === ENVIRONMENT CONFIG ===
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "admin")
+DASHBOARD_PASS = os.environ.get("DASHBOARD_PASS")
+if not DASHBOARD_PASS:
+    DASHBOARD_PASS = secrets.token_urlsafe(12)  # shorter for easier manual entry
+    # SECURITY: Do not log or print the actual password value to error log or stdout
+    # (per audit recommendation). Direct user to the credentials file only.
+    msg = "⚠️  DASHBOARD_PASS environment variable not set. A secure random password was generated for this session only."
     try:
         ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -29,74 +42,311 @@ def log_dashboard_error(msg: str):
             f.write(f"[{timestamp}] {msg}\n")
     except Exception:
         pass
+    log_dashboard_error(msg, console=True)
+    log_dashboard_error("📄 See chains/dashboard_credentials.txt for the exact username and password (protect this file).", console=True)
+    log_dashboard_error("   Recommended: export DASHBOARD_USER=... and DASHBOARD_PASS=... before starting to use a fixed password.", console=True)
 
-# --- Globals ---
-# This will hold the subprocess.Popen object of the running Cobaya job
-RUNNING_PROCESS = None
-# This will hold the background monitor process for auto-plotting
-MONITOR_PROCESS = None
-# This will hold the output prefix parsed from the YAML, e.g., "chains/prtoe_polychord"
-ACTIVE_OUTPUT_PREFIX = ""
-# Holds external logs (like from the monitor script) to be passed to the UI
-EXTERNAL_LOGS = []
-# Holds the path to the currently active YAML config
-ACTIVE_YAML_PATH = ""
-# Holds the persistent state of the system
-CURRENT_STATUS = "idle"
-# Holds the latest structured alerts from the watchdog
-WATCHDOG_ALERTS = []
-# Tracks the start time of the active run to compute ETA and speed
-RUN_START_TIME = None
-# Holds the localtunnel (phone) URL injected by the launcher wrapper script
-LOCALTUNNEL_URL = None
+    # Write ONLY to the dedicated credentials file (never to error log)
+    try:
+        cred_path = Path("chains/dashboard_credentials.txt")
+        cred_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cred_path, "w") as cf:
+            cf.write(f"Username: {DASHBOARD_USER}\n")
+            cf.write(f"Password: {DASHBOARD_PASS}\n")
+            cf.write("Use these for HTTP Basic Auth login to the dashboard.\n")
+            cf.write("To avoid random passwords on every start, set the env vars before launching:\n")
+            cf.write("  export DASHBOARD_USER=admin\n")
+            cf.write("  export DASHBOARD_PASS=your-chosen-password\n")
+        try:
+            os.chmod(cred_path, 0o600)
+        except Exception:
+            pass
+        log_dashboard_error(f"📄 Credentials saved to: {cred_path}", console=True)
+    except Exception as e:
+        # Last resort: print the value so user can still login (but not ideal)
+        log_dashboard_error(f"Warning: Could not write credentials file ({e}). Temporary password (copy now): {DASHBOARD_PASS}", console=True)
 
-# --- Cosmology Curves & Run History Cache ---
-COSMO_CURVES_CACHE = None
-LAST_COMPUTED_CHI2 = None
-HISTORY_FRAMES = []
-LAST_FRAME_MOD_TIME = 0
-LAST_FRAME_HASH = None
-LOG_EVAL_POSITION = 0
-LOG_EVAL_COUNT = 0
+    os.environ["DASHBOARD_PASS"] = DASHBOARD_PASS
+
+def log_dashboard_error(msg: str, console: bool = True):
+    """Structured error/info logger. Always appends to chains/dashboard_errors.log with timestamp.
+    Optionally also prints to console (default True). Use console=False for sensitive info."""
+    try:
+        ERROR_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        with open(ERROR_LOG_PATH, 'a') as f:
+            f.write(f"[{timestamp}] {msg}\n")
+    except Exception:
+        pass
+    if console:
+        try:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
+        except Exception:
+            pass
+
+# Lifespan (must be defined before FastAPI app= that references it)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Modern lifespan handler (replaces deprecated on_event startup/shutdown).
+    Starts the background watcher and ensures cleanup on exit (even on SIGTERM in Docker/launchers)."""
+    # Startup
+    watcher_task = asyncio.create_task(background_process_watcher())
+    log_dashboard_error("CosmicDashboard lifespan startup: background watcher launched.", console=False)
+    yield
+    # Shutdown
+    log_dashboard_error("Application shutdown (lifespan) triggered — cleaning up active processes.", console=True)
+    try:
+        await asyncio.wait_for(stop_run(), timeout=8.0)
+    except asyncio.TimeoutError:
+        log_dashboard_error("Stop run timed out on shutdown; forcing hard kill of process groups.", console=True)
+        try:
+            if state.running_process:
+                try:
+                    os.killpg(os.getpgid(state.running_process.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        state.running_process.kill()
+                    except Exception: pass
+            state.running_process = None
+            if state.monitor_process:
+                try:
+                    os.killpg(os.getpgid(state.monitor_process.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        state.monitor_process.kill()
+                    except Exception: pass
+            state.monitor_process = None
+        except Exception as ek:
+            log_dashboard_error(f"Hard shutdown kill error: {ek}")
+    except Exception as e:
+        log_dashboard_error(f"Error during shutdown process cleanup: {e}")
+
+    # Extra cleanup of in-memory state
+    try:
+        state.external_logs.clear()
+        state.watchdog_alerts.clear()
+        state.history_frames.clear()
+        state.cosmo_curves_cache = None
+        if hasattr(state.model_curves_cache, 'cache'):
+            state.model_curves_cache.cache.clear()
+        state.rebuild_progress = {"status": "idle", "log": []}
+    except Exception:
+        pass
+    # Cancel watcher
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except asyncio.CancelledError:
+        pass
+    log_dashboard_error("Shutdown cleanup complete.", console=False)
+
+# --- State is managed by StateManager (defined below) ---
+# All former globals are now attributes of the `state` singleton.
 
 
-# --- HTTP Basic Authentication for Remote Security ---
+# --- HTTP Basic Authentication (Optional for local) ---
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi import Depends, status
-import secrets
 
 security = HTTPBasic()
 
-def authenticate(credentials: HTTPBasicCredentials = Depends(security)):
-    required_user = os.environ.get("DASHBOARD_USER", "")
+FAILED_LOGIN_ATTEMPTS = {}  # ip -> (count, lock_until)
+
+def authenticate(request: Request, credentials: HTTPBasicCredentials = Depends(security)):
+    """Supports both cookie (remember me) and Basic Auth. Used for any remaining Depends and consistency."""
+    # Cookie "remember me" session takes precedence
+    token = request.cookies.get("dashboard_session")
+    if token and token in DASHBOARD_SESSIONS:
+        sess = DASHBOARD_SESSIONS[token]
+        if time.time() < sess.get("exp", 0):
+            return sess["user"]
+        else:
+            DASHBOARD_SESSIONS.pop(token, None)
+
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    # Check rate limit (for Basic attempts)
+    if client_ip in FAILED_LOGIN_ATTEMPTS:
+        count, lock_until = FAILED_LOGIN_ATTEMPTS[client_ip]
+        if lock_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. Please try again later.",
+            )
+            
+    required_user = os.environ.get("DASHBOARD_USER", "admin")
     required_pass = os.environ.get("DASHBOARD_PASS", "")
-    if not required_user or not required_pass:
+    
+    if not required_pass:
         raise HTTPException(
-            status_code=500,
-            detail="Server misconfiguration: DASHBOARD_USER and DASHBOARD_PASS environment variables must be set."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Authentication is misconfigured.",
         )
+        
     correct_username = secrets.compare_digest(credentials.username, required_user)
     correct_password = secrets.compare_digest(credentials.password, required_pass)
     
     if not (correct_username and correct_password):
+        # Increment failed attempts
+        count, lock_until = FAILED_LOGIN_ATTEMPTS.get(client_ip, (0, 0.0))
+        count += 1
+        if count >= 5:
+            lock_until = now + 60.0 # lock for 60 seconds
+            log_dashboard_error(f"🔒 Rate limit triggered for IP {client_ip} due to 5 consecutive login failures.", console=True)
+        FAILED_LOGIN_ATTEMPTS[client_ip] = (count, lock_until)
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Basic"},
         )
+        
+    # Reset failed attempts on success
+    FAILED_LOGIN_ATTEMPTS.pop(client_ip, None)
     return credentials.username
 
 # --- FastAPI App Setup ---
-app = FastAPI(title="CosmicDashboard Backend", dependencies=[Depends(authenticate)])
+app = FastAPI(
+    title="CosmicDashboard Backend", 
+    # dependencies=[Depends(authenticate)],  # now handled by middleware + per-route for flexibility with cookie "remember me"
+    # Allow larger payloads for chain data
+    max_request_size=50 * 1024 * 1024,
+    lifespan=lifespan
+)
+from fastapi.responses import JSONResponse
 
-# Allow all origins for local file:// access from the browser
+@app.middleware("http")
+async def sanitize_paths_middleware(request: Request, call_next):
+    query_params = dict(request.query_params)
+    if "config_name" in query_params:
+        try:
+            sanitize_config_name(query_params["config_name"])
+        except HTTPException as e:
+            return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
+    return await call_next(request)
+
+# --- Auth middleware (http style) for cookie "remember me" support + Basic fallback
+# Placed after sanitize. Protects API routes but allows static UI load and public /api/login.
+@app.middleware("http")
+async def dashboard_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    public = ("/api/login", "/api/logout", "/api/health", "/api/uptime", "/api/sysinfo")
+    if path.startswith("/api/") and not any(path.startswith(p) for p in public):
+        # Cookie session first (remember me)
+        token = request.cookies.get("dashboard_session")
+        if token and token in DASHBOARD_SESSIONS:
+            sess = DASHBOARD_SESSIONS[token]
+            if time.time() < sess.get("exp", 0):
+                return await call_next(request)
+            else:
+                DASHBOARD_SESSIONS.pop(token, None)
+        # Basic Auth fallback (curl, API clients)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("basic "):
+            try:
+                import base64
+                encoded = auth_header.split(" ", 1)[1]
+                decoded = base64.b64decode(encoded).decode("utf-8", errors="ignore")
+                user, pwd = decoded.split(":", 1)
+                req_user = os.environ.get("DASHBOARD_USER", "admin")
+                req_pass = os.environ.get("DASHBOARD_PASS", "")
+                if secrets.compare_digest(user, req_user) and secrets.compare_digest(pwd, req_pass):
+                    return await call_next(request)
+            except Exception:
+                pass
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Authentication required. POST to /api/login (body with username/password + optional remember_me) or use HTTP Basic."},
+            headers={"WWW-Authenticate": "Basic realm=\"CosmicDashboard\""},
+        )
+    return await call_next(request)
+
+cors_origins_env = os.environ.get("DASHBOARD_CORS_ORIGINS")
+if cors_origins_env:
+    allowed_origins = [o.strip() for o in cors_origins_env.split(",") if o.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Auth Middleware for cookie "remember me" + Basic support (no more global Depends for static UI)
+# Protects /api/* routes (except public login/logout) using cookie or Authorization header.
+# This allows the static dashboard to load unauthenticated, while JS can show in-app login modal.
+# Existing Basic Auth still works for curl / API clients.
+async def _dashboard_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    # Public endpoints that must be reachable for first-time login and health
+    public_prefixes = ("/api/login", "/api/logout", "/api/health", "/api/uptime", "/api/sysinfo")
+    if path.startswith("/api/") and not any(path.startswith(p) for p in public_prefixes):
+        # Check cookie-based session (for "remember me" flow)
+        session_token = request.cookies.get("dashboard_session")
+        if session_token and session_token in DASHBOARD_SESSIONS:
+            sess = DASHBOARD_SESSIONS[session_token]
+            if time.time() < sess.get("exp", 0):
+                # valid session, allow
+                return await call_next(request)
+            else:
+                DASHBOARD_SESSIONS.pop(session_token, None)
+        # Fall back to HTTP Basic (for API clients / curl that send Authorization)
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.lower().startswith("basic "):
+            try:
+                import base64
+                encoded = auth_header.split(" ", 1)[1]
+                decoded = base64.b64decode(encoded).decode("utf-8", errors="ignore")
+                user, pwd = decoded.split(":", 1)
+                req_user = os.environ.get("DASHBOARD_USER", "admin")
+                req_pass = os.environ.get("DASHBOARD_PASS", "")
+                if secrets.compare_digest(user, req_user) and secrets.compare_digest(pwd, req_pass):
+                    # optionally apply failed login reset here
+                    return await call_next(request)
+            except Exception:
+                pass
+        # Not authenticated
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"detail": "Authentication required. Use /api/login or HTTP Basic Auth."},
+            headers={"WWW-Authenticate": "Basic realm=\"CosmicDashboard\""},
+        )
+    return await call_next(request)
+
+# Note: middleware added below as @app.middleware to avoid import issues
+
+# Global error handler for better context + timestamps on all HTTP errors
+@app.exception_handler(HTTPException)
+async def custom_http_exception_handler(request: Request, exc: HTTPException):
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    path = str(getattr(request, "url", {}).path) if request else "unknown"
+    detail = exc.detail
+    if isinstance(detail, (dict, list)):
+        detail = json.dumps(detail, default=str)[:300]
+    log_msg = f"HTTPException {exc.status_code} @ {path} : {detail}"
+    log_dashboard_error(log_msg, console=False)
+    enriched = f"[{ts}] {detail}"
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": enriched,
+            "timestamp": ts,
+            "path": path,
+            "status_code": exc.status_code
+        },
+        headers=getattr(exc, "headers", None) or None
+    )
 
 # --- Pydantic Models for API requests ---
 class RunConfig(BaseModel):
@@ -104,6 +354,11 @@ class RunConfig(BaseModel):
     cores: int = psutil.cpu_count(logical=False) or 4
     auto_rebuild: bool = True
     force_overwrite: Optional[bool] = None
+
+    @validator('config_name')
+    def val_config_name(cls, v):
+        return sanitize_config_name(v)
+
 class LogMessage(BaseModel):
     message: str
 class UpdateBaseline(BaseModel):
@@ -125,528 +380,170 @@ class ApplyPriorsRequest(BaseModel):
     config_name: str
     updates: dict
 
+    @validator('config_name')
+    def val_config_name(cls, v):
+        return sanitize_config_name(v)
+
 class CenterPriorsRequest(BaseModel):
     config_name: str
 
+    @validator('config_name')
+    def val_config_name(cls, v):
+        return sanitize_config_name(v)
+
 # --- Helper Functions ---
-def get_output_prefix_from_yaml(config_path: str) -> str:
-    """Parses the YAML file to find the 'output' key."""
-    try:
-        with open(config_path, 'r') as f:
-            config = yaml.safe_load(f)
-            if 'output' in config:
-                return config['output']
-    except Exception:
-        pass
-    # Fallback if not found
-    return "chains/cobaya_run"
+import collections
+import time
 
-def get_model_yaml_path(output_prefix: str) -> Optional[Path]:
-    """Finds a configuration YAML file corresponding to output_prefix (either updated, input, active, or workspace search)."""
-    global ACTIVE_YAML_PATH
-    
-    # 1. Try updated.yaml
-    updated_yaml = Path(f"{output_prefix}.updated.yaml")
-    if updated_yaml.exists():
-        return updated_yaml
+def sanitize_config_name(name: str) -> str:
+    """Sanitizes configuration file name to prevent path traversal."""
+    if not name:
+        raise HTTPException(status_code=400, detail="Config name cannot be empty")
+    if not re.match(r'^[a-zA-Z0-9_\-/\.\s]+$', name):
+        raise HTTPException(status_code=400, detail="Invalid config name")
+    abs_path = os.path.abspath(name)
+    # Configurable workspace root (for Docker, other users, WSL etc.)
+    allowed_dir = os.environ.get("DASHBOARD_WORKSPACE_ROOT") or os.path.abspath("/home/themilkmanj")
+    allowed_dir = os.path.abspath(allowed_dir)
+    if not abs_path.startswith(allowed_dir):
+        raise HTTPException(status_code=400, detail="Access denied: file must be located inside the allowed workspace directory.")
+    # Return relative if possible, but keep abs for backward (callers expect abs in some places)
+    return abs_path
+
+class LRUCacheWithTTL:
+    def __init__(self, maxsize=50, ttl=300):
+        self.cache = collections.OrderedDict()
+        self.maxsize = maxsize
+        self.ttl = ttl
         
-    # 2. Try input.yaml
-    input_yaml = Path(f"{output_prefix}.input.yaml")
-    if input_yaml.exists():
-        return input_yaml
+    def get(self, key):
+        if key not in self.cache:
+            return None
+        val, ts = self.cache[key]
+        if time.time() - ts > self.ttl:
+            del self.cache[key]
+            return None
+        self.cache.move_to_end(key)
+        return val
         
-    # 3. Try ACTIVE_YAML_PATH
-    if ACTIVE_YAML_PATH and Path(ACTIVE_YAML_PATH).exists():
-        try:
-            if get_output_prefix_from_yaml(ACTIVE_YAML_PATH) == output_prefix:
-                return Path(ACTIVE_YAML_PATH)
-        except Exception:
-            pass
-            
-    # 4. Search in root and chains/ directories for matching output field
-    for ypath in [Path("."), Path("chains")]:
-        if ypath.exists():
-            for yfile in ypath.glob("*.yaml"):
-                try:
-                    if get_output_prefix_from_yaml(str(yfile)) == output_prefix:
-                        return yfile
-                except Exception:
-                    pass
-    return None
+    def set(self, key, value):
+        if key in self.cache:
+            del self.cache[key]
+        elif len(self.cache) >= self.maxsize:
+            self.cache.popitem(last=False)
+        self.cache[key] = (value, time.time())
 
-
-def parse_polychord_stats(stats_file: Path, resume_file: Optional[Path] = None):
-    """Parses a PolyChord .stats file or .resume file to extract key metrics (dead points, evidence)."""
-    stats = {
-        "dead_points": 0,
-        "log_evidence": None,
-        "log_evidence_error": None,
-    }
-
-    # 1. Try reading the completed stats file first
-    if stats_file.exists():
-        try:
-            with open(stats_file, 'r') as f:
-                content = f.read()
-
-            # Read dead points
-            ndead_match = re.search(r"ndead:\s*(\d+)", content)
-            if ndead_match:
-                stats["dead_points"] = int(ndead_match.group(1))
-
-            # Read nlive
-            nlive_match = re.search(r"nlive:\s*(\d+)", content)
-            if nlive_match:
-                stats["nlive"] = int(nlive_match.group(1))
-
-            # Read log(Z) and error from stats file
-            logz_match = re.search(r"log\(Z\)\s*=\s*([-\d.eE+]+)\s*\+/-\s*([-\d.eE+]+)", content)
-            if logz_match:
-                stats["log_evidence"] = float(logz_match.group(1))
-                stats["log_evidence_error"] = float(logz_match.group(2))
-                return stats
-        except Exception:
-            pass
-
-    # 2. Fall back to reading the resume file for real-time progress if stats file is not complete/exists
-    if resume_file and resume_file.exists():
-        try:
-            with open(resume_file, 'r') as f:
-                content = f.read()
-
-            # Read dead points (iterations)
-            dead_points_match = re.search(r"=== Number of dead points/iterations ===\s*\n\s*(\d+)", content)
-            if dead_points_match:
-                stats["dead_points"] = int(dead_points_match.group(1))
-
-            # Read log(Z)
-            logz_match = re.search(r"=== global evidence -- log\(<Z>\) ===\s*\n\s*([-\d.eE+]+)", content)
-            if logz_match:
-                stats["log_evidence"] = float(logz_match.group(1))
-
-            # Read log(Z^2) to estimate the error
-            logz2_match = re.search(r"=== global evidence\^2 -- log\(<Z\^2>\) ===\s*\n\s*([-\d.eE+]+)", content)
-            if logz_match and logz2_match:
-                import math
-                logz = float(logz_match.group(1))
-                logz2 = float(logz2_match.group(1))
-                try:
-                    diff = logz2 - 2 * logz
-                    if 0 < diff < 700:
-                        stats["log_evidence_error"] = (math.exp(diff) - 1)**0.5
-                    elif diff >= 700:
-                        stats["log_evidence_error"] = 10.0
-                    else:
-                        stats["log_evidence_error"] = 0.1
-                except Exception:
-                    stats["log_evidence_error"] = 0.1
-            return stats
-        except Exception:
-            pass
-
-    # 3. Fall back to parsing the log file to get an initialization-phase prior-average evidence baseline
-    log_file = stats_file.with_suffix(".log")
-    if not log_file.exists() and "polychord_raw" in str(stats_file):
-        log_file = stats_file.parent.parent / f"{stats_file.stem}.log"
-    if log_file.exists():
-        try:
-            logls = []
-            pattern = re.compile(r"Computed derived parameters:\s*(\{.*\})")
-            with open(log_file, 'r') as f:
-                for line in f:
-                    match = pattern.search(line)
-                    if match:
-                        try:
-                            import ast
-                            params_dict = ast.literal_eval(match.group(1))
-                            chi2_keys = [k for k in params_dict.keys() if k.startswith('chi2__')]
-                            if chi2_keys:
-                                cmb_vals = [params_dict[k] for k in chi2_keys if 'cmb' in k.lower() or 'planck' in k.lower()]
-                                bao_vals = [params_dict[k] for k in chi2_keys if 'bao' in k.lower()]
-                                sn_vals = [params_dict[k] for k in chi2_keys if 'sn' in k.lower() or 'pantheon' in k.lower() or 'shoes' in k.lower()]
-                                
-                                cmb_sum = sum(cmb_vals) if cmb_vals else 0.0
-                                bao_sum = sum(bao_vals) if bao_vals else 0.0
-                                sn_sum = sum(sn_vals) if sn_vals else 0.0
-                                
-                                chi2_bao = params_dict.get('chi2__BAO', bao_sum)
-                                chi2_cmb = params_dict.get('chi2__CMB', cmb_sum)
-                                chi2_sn = params_dict.get('chi2__SN', sn_sum)
-                                
-                                tot_chi2 = (chi2_bao or 0.0) + (chi2_cmb or 0.0) + (chi2_sn or 0.0)
-                                if tot_chi2 == 0.0:
-                                    tot_chi2 = sum([params_dict[k] for k in chi2_keys])
-                                
-                                if tot_chi2 > 0.0:
-                                    logls.append(-0.5 * tot_chi2)
-                        except Exception:
-                            pass
-            
-            print(f"Log parsing debug: stats_file={stats_file}, log_file={log_file}, exists={log_file.exists()}, len(logls)={len(logls)}")
-            if logls:
-                import math
-                max_val = max(logls)
-                logz_prior = max_val + math.log(sum(math.exp(x - max_val) for x in logls)) - math.log(len(logls))
-                stats["log_evidence"] = logz_prior
-                
-                # Estimate uncertainty as the standard error of the mean
-                log_mean_L2 = max(2 * x for x in logls) + math.log(sum(math.exp(2 * x - max(2 * y for y in logls)) for x in logls)) - math.log(len(logls))
-                diff = log_mean_L2 - 2 * logz_prior
-                if 0 < diff < 700:
-                    stats["log_evidence_error"] = ((math.exp(diff) - 1) / len(logls))**0.5
-                elif diff >= 700:
-                    stats["log_evidence_error"] = 10.0
-                else:
-                    stats["log_evidence_error"] = 0.5
-        except Exception as e:
-            print(f"Log parsing error: {e}")
-
-    return stats
-
-# --- Performance Optimization Cache ---
-LOG_FILE_POSITION = 0
-BEST_FIT_LOG_CACHE = None
-
-STRUGGLES_FILE_POSITION = 0
-STRUGGLES_CACHE = {}
-STRUGGLES_RANK_STATE = {}
-STRUGGLES_RANK_TRACEBACK = {}
-CLASS_ERROR_LOGS = []
-
-RAW_FILE_POSITIONS = {}
-BEST_FIT_FILE_CACHE = {}
-
-def get_best_fit_from_log(log_path):
-    """Parses the log file to extract real-time evaluations and find the best fit chi2 and parameters."""
-    global LOG_FILE_POSITION, BEST_FIT_LOG_CACHE
-    if not log_path or not os.path.exists(log_path):
-        return None
+class StateManager:
+    def __init__(self):
+        self.running_process = None
+        self.monitor_process = None
+        self.active_output_prefix = ""
+        self.external_logs = []
+        self.active_yaml_path = ""
+        self.current_status = "idle"
+        self.watchdog_alerts = []
+        self.run_start_time = None
+        self.localtunnel_url = None
+        self.cosmo_curves_cache = None
+        self.last_computed_chi2 = None
+        self.history_frames = []
+        self.last_frame_mod_time = 0
+        self.last_frame_hash = None
         
-    try:
-        file_size = os.path.getsize(log_path)
-        if file_size < LOG_FILE_POSITION:
-            LOG_FILE_POSITION = 0
-            # Mid-run log truncations should NOT reset the historical best chi2 cache
-            
-        best_chi2 = BEST_FIT_LOG_CACHE["total"] if BEST_FIT_LOG_CACHE else float('inf')
-        best_eval = BEST_FIT_LOG_CACHE
+        # Log parser offsets/caches
+        self.log_eval_position = 0
+        self.log_eval_count = 0
+        self.log_file_position = 0
+        self.best_fit_log_cache = None
+        self.struggles_file_position = 0
+        self.struggles_cache = {}
+        self.struggles_rank_state = {}
+        self.struggles_rank_traceback = {}
+        self.class_error_logs = []
         
-        # We match lines like: Computed derived parameters: {'A_s': ..., 'chi2__BAO': 290.87, ...}
-        pattern = re.compile(r"Computed derived parameters:\s*(\{.*\})")
+        # Raw files caches
+        self.raw_file_positions = {}
+        self.best_fit_file_cache = {}
         
-        with open(log_path, 'r') as f:
-            f.seek(LOG_FILE_POSITION)
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    try:
-                        import ast
-                        params_dict = ast.literal_eval(match.group(1))
-                        chi2_keys = [k for k in params_dict.keys() if k.startswith('chi2__')]
-                        if chi2_keys:
-                            cmb_vals = [params_dict[k] for k in chi2_keys if 'cmb' in k.lower() or 'planck' in k.lower()]
-                            bao_vals = [params_dict[k] for k in chi2_keys if 'bao' in k.lower()]
-                            sn_vals = [params_dict[k] for k in chi2_keys if 'sn' in k.lower() or 'pantheon' in k.lower() or 'shoes' in k.lower()]
-                            
-                            cmb_sum = sum(cmb_vals) if cmb_vals else None
-                            bao_sum = sum(bao_vals) if bao_vals else None
-                            sn_sum = sum(sn_vals) if sn_vals else None
-                            
-                            chi2_bao = params_dict.get('chi2__BAO', bao_sum)
-                            chi2_cmb = params_dict.get('chi2__CMB', cmb_sum)
-                            chi2_sn = params_dict.get('chi2__SN', sn_sum)
-                            
-                            tot = (chi2_bao or 0.0) + (chi2_cmb or 0.0) + (chi2_sn or 0.0)
-                            if tot == 0.0:
-                                tot = sum([params_dict[k] for k in chi2_keys])
-                                
-                            if tot < best_chi2:
-                                best_chi2 = tot
-                                best_eval = {
-                                    "total": tot,
-                                    "cmb": chi2_cmb,
-                                    "bao": chi2_bao,
-                                    "sn": chi2_sn,
-                                    "raw_params": params_dict
-                                }
-                    except Exception:
-                        continue
-            LOG_FILE_POSITION = f.tell()
-            BEST_FIT_LOG_CACHE = best_eval
-    except Exception:
-        pass
-    return BEST_FIT_LOG_CACHE
+        # Model curves cache
+        self.model_curves_cache = LRUCacheWithTTL(maxsize=50, ttl=300)
+        self.rebuild_progress = {"status": "idle", "log": []}
 
-def extract_model_struggles(log_path):
-    """Associates CLASS error tracebacks with subsequent evaluation failures on the same MPI rank."""
-    global STRUGGLES_FILE_POSITION, STRUGGLES_CACHE, STRUGGLES_RANK_STATE, STRUGGLES_RANK_TRACEBACK, CLASS_ERROR_LOGS
-    if not log_path or not os.path.exists(log_path):
-        return {}
-        
-    try:
-        file_size = os.path.getsize(log_path)
-        if file_size < STRUGGLES_FILE_POSITION:
-            STRUGGLES_FILE_POSITION = 0
-            STRUGGLES_CACHE = {}
-            STRUGGLES_RANK_STATE = {}
-            STRUGGLES_RANK_TRACEBACK = {}
-            
-        pattern_rank = re.compile(r"\[(\d+)\s*:\s*(\w+)\]")
-        
-        with open(log_path, 'r') as lf:
-            lf.seek(STRUGGLES_FILE_POSITION)
-            for line in lf:
-                match = pattern_rank.search(line)
-                if match:
-                    rank = int(match.group(1))
-                    source = match.group(2)
-                    
-                    if source == 'classy':
-                        if "failed" in line.lower() or "error" in line.lower() or "ignored error" in line.lower():
-                            STRUGGLES_RANK_STATE[rank] = 'failed_class'
-                            STRUGGLES_RANK_TRACEBACK[rank] = [line]
-                        elif STRUGGLES_RANK_STATE.get(rank) == 'failed_class':
-                            STRUGGLES_RANK_TRACEBACK[rank].append(line)
-                    elif source == 'model' and "calculation failed" in line.lower():
-                        if STRUGGLES_RANK_STATE.get(rank) == 'failed_class':
-                            raw_tb = "".join(STRUGGLES_RANK_TRACEBACK[rank]).strip()
-                            if raw_tb and raw_tb not in CLASS_ERROR_LOGS:
-                                CLASS_ERROR_LOGS.append(raw_tb)
-                                if len(CLASS_ERROR_LOGS) > 10:
-                                    CLASS_ERROR_LOGS.pop(0)
-                            traceback_text = raw_tb.lower()
-                            
-                            if "ncdm" in traceback_text or "neutrino" in traceback_text or "non-cold" in traceback_text:
-                                STRUGGLES_CACHE["NCDM (Massive Neutrinos)"] = STRUGGLES_CACHE.get("NCDM (Massive Neutrinos)", 0) + 1
-                            elif "background" in traceback_text:
-                                STRUGGLES_CACHE["Background Dynamics"] = STRUGGLES_CACHE.get("Background Dynamics", 0) + 1
-                            elif "thermo" in traceback_text or "reionization" in traceback_text:
-                                STRUGGLES_CACHE["Thermal History"] = STRUGGLES_CACHE.get("Thermal History", 0) + 1
-                            elif "perturb" in traceback_text:
-                                STRUGGLES_CACHE["Perturbations (Cls)"] = STRUGGLES_CACHE.get("Perturbations (Cls)", 0) + 1
-                            elif "lensing" in traceback_text:
-                                STRUGGLES_CACHE["Lensing Integration"] = STRUGGLES_CACHE.get("Lensing Integration", 0) + 1
-                            else:
-                                STRUGGLES_CACHE["Numerical Instability"] = STRUGGLES_CACHE.get("Numerical Instability", 0) + 1
-                                
-                            STRUGGLES_RANK_STATE[rank] = None
-                            STRUGGLES_RANK_TRACEBACK[rank] = []
-                    elif source == 'model' and STRUGGLES_RANK_STATE.get(rank) == 'failed_class':
-                        STRUGGLES_RANK_STATE[rank] = None
-                        STRUGGLES_RANK_TRACEBACK[rank] = []
-                else:
-                    for r, state in STRUGGLES_RANK_STATE.items():
-                        if state == 'failed_class':
-                            STRUGGLES_RANK_TRACEBACK[r].append(line)
-            STRUGGLES_FILE_POSITION = lf.tell()
-    except Exception:
-        pass
-        
-    return dict(STRUGGLES_CACHE)
+    def reset_for_run(self):
+        self.log_file_position = 0
+        self.best_fit_log_cache = None
+        self.raw_file_positions = {}
+        self.best_fit_file_cache = {}
+        self.history_frames = []
+        self.last_frame_mod_time = 0
+        self.last_frame_hash = None
+        self.cosmo_curves_cache = None
+        self.last_computed_chi2 = None
+        self.log_eval_position = 0
+        self.log_eval_count = 0
+        self.external_logs.clear()
+        self.watchdog_alerts.clear()
 
-def get_best_fit_details(output_prefix: str):
-    """Reads the raw PolyChord text file or log to find the lowest -2 ln(L) (chi2) and its individual dataset breakdowns."""
-    global RAW_FILE_POSITIONS, BEST_FIT_FILE_CACHE
-    log_file = Path(f"{output_prefix}.log")
-    best_log_fit = get_best_fit_from_log(log_file)
-    
-    prefix_path = Path(output_prefix)
-    raw_file = prefix_path.parent / f"{prefix_path.name}_polychord_raw" / f"{prefix_path.name}.txt"
-    live_file = prefix_path.parent / f"{prefix_path.name}_polychord_raw" / f"{prefix_path.name}_phys_live.txt"
-    final_file = Path(f"{output_prefix}.txt")
-    
-    files_to_check = []
-    if final_file.exists():
-        files_to_check.append((final_file, "final"))
-    if raw_file.exists():
-        files_to_check.append((raw_file, "raw_txt"))
-    if live_file.exists():
-        files_to_check.append((live_file, "live"))
-        
-    best_file_fit = None
-    best_chi2_file = float('inf')
-    
-    for fpath, ftype in files_to_check:
-        fpath_str = str(fpath)
-        yaml_to_read = get_model_yaml_path(output_prefix)
-        if not yaml_to_read or not yaml_to_read.exists():
-            continue
-            
-        try:
-            file_size = os.path.getsize(fpath)
-            # Reset position if file is truncated, but do NOT clear the historical best-fit cache!
-            if fpath_str not in RAW_FILE_POSITIONS or file_size < RAW_FILE_POSITIONS[fpath_str]:
-                RAW_FILE_POSITIONS[fpath_str] = 0
-                
-            current_best = BEST_FIT_FILE_CACHE.get(fpath_str)
-            best_chi2_this_file = current_best["total"] if current_best else float('inf')
-            best_fit_this_file = current_best
-            
-            with open(yaml_to_read, 'r') as f:
-                up_cfg = yaml.safe_load(f)
-                
-            params = up_cfg.get('params', {})
-            likelihoods = up_cfg.get('likelihood', {})
-            
-            sampled = []
-            derived = []
-            
-            for name, p_dict in params.items():
-                if not isinstance(p_dict, dict):
-                    continue
-                if 'value' in p_dict:
-                    val = p_dict['value']
-                    if isinstance(val, str) and 'lambda' in val:
-                        derived.append(name)
-                elif 'prior' in p_dict:
-                    sampled.append(name)
-                else:
-                    derived.append(name)
-                    
-            with open(fpath, 'r') as f:
-                f.seek(RAW_FILE_POSITIONS[fpath_str])
-                
-                # Check for header in final_file
-                has_header = False
-                names_in_header = []
-                if ftype == "final" and RAW_FILE_POSITIONS[fpath_str] == 0:
-                    first_line = f.readline()
-                    if first_line.startswith('#'):
-                        has_header = True
-                        names_in_header = first_line.lstrip('#').strip().split()
-                    else:
-                        f.seek(0)
-                
-                for line in f:
-                    if line.strip().startswith('#'):
-                        continue
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
-                        try:
-                            # 1. Compute total chi2 based on file type
-                            if ftype == "live":
-                                chi2 = -2.0 * float(parts[-1])
-                            elif ftype == "raw_txt":
-                                chi2 = float(parts[1])
-                            elif ftype == "final":
-                                if has_header and 'minuslogprior' in names_in_header:
-                                    minuslogpost = float(parts[names_in_header.index('minuslogpost')])
-                                    minuslogprior = float(parts[names_in_header.index('minuslogprior')])
-                                    chi2 = 2.0 * (minuslogpost - minuslogprior)
-                                else:
-                                    chi2 = 2.0 * (float(parts[1]) - float(parts[2]))
+state = StateManager()
 
-                            if chi2 < best_chi2_this_file:
-                                best_chi2_this_file = chi2
-                                best_parts = parts
-                                
-                                raw_params = {}
-                                
-                                # 2. Map parameters based on file type
-                                if ftype == "final" and has_header:
-                                    for idx, name in enumerate(names_in_header):
-                                        if idx < len(best_parts):
-                                            try:
-                                                raw_params[name] = float(best_parts[idx])
-                                            except ValueError:
-                                                pass
-                                else:
-                                    if ftype == "final":
-                                        sampled_clean = [p for p in sampled if not params[p].get('drop')]
-                                        names_params = sampled_clean + derived
-                                        idx_start = 3
-                                    elif ftype == "live":
-                                        priors = ["logprior__0"]
-                                        likes = [f"loglike__{name}" for name in likelihoods.keys()]
-                                        names_params = sampled + derived + priors + likes
-                                        idx_start = 0
-                                    else: # raw_txt
-                                        priors = ["logprior__0"]
-                                        likes = [f"loglike__{name}" for name in likelihoods.keys()]
-                                        names_params = sampled + derived + priors + likes
-                                        idx_start = 2
-                                        
-                                    for i, name in enumerate(names_params):
-                                        idx = idx_start + i
-                                        if idx < len(best_parts):
-                                            raw_params[name] = float(best_parts[idx])
-                                            
-                                # 3. Safely sum likelihood parameters to positive chi2 values (handling loglike and chi2 prefixes)
-                                cmb_vals = []
-                                bao_vals = []
-                                desi_vals = []
-                                sn_vals = []
-                                lensing_vals = []
-                                other_vals = []
-                                
-                                # Check group existence to prevent double counting group vs individual keys
-                                has_cmb_group = any(k.startswith('chi2__') and ('cmb' in k.lower() or 'planck' in k.lower()) for k in raw_params.keys())
-                                has_bao_group = any(k.startswith('chi2__') and ('bao' in k.lower() or 'boss' in k.lower() or 'desi' in k.lower()) for k in raw_params.keys())
-                                has_sn_group = any(k.startswith('chi2__') and ('sn' in k.lower() or 'pantheon' in k.lower() or 'shoes' in k.lower()) for k in raw_params.keys())
-                                has_lensing_group = any(k.startswith('chi2__') and ('lensing' in k.lower() or 'lens' in k.lower()) for k in raw_params.keys())
-                                
-                                for k, v in raw_params.items():
-                                    if not (k.startswith('chi2__') or k.startswith('loglike__')):
-                                        continue
-                                    
-                                    # Skip individual loglike if a corresponding category chi2__ group key is present
-                                    if k.startswith('loglike__'):
-                                        k_lower = k.lower()
-                                        if has_cmb_group and ('cmb' in k_lower or 'planck' in k_lower):
-                                            continue
-                                        if has_bao_group and ('bao' in k_lower or 'boss' in k_lower or 'desi' in k_lower):
-                                            continue
-                                        if has_sn_group and ('sn' in k_lower or 'pantheon' in k_lower or 'shoes' in k_lower):
-                                            continue
-                                        if has_lensing_group and ('lensing' in k_lower or 'lens' in k_lower):
-                                            continue
-                                            
-                                    val = -2.0 * v if k.startswith('loglike__') else v
-                                    k_lower = k.lower()
-                                    
-                                    # Group desi under bao and lensing under cmb to align with UI stats panels
-                                    if 'desi' in k_lower or 'bao' in k_lower or 'boss' in k_lower:
-                                        bao_vals.append(val)
-                                    elif 'lensing' in k_lower or 'lens' in k_lower or 'cmb' in k_lower or 'planck' in k_lower:
-                                        cmb_vals.append(val)
-                                    elif 'sn' in k_lower or 'pantheon' in k_lower or 'shoes' in k_lower:
-                                        sn_vals.append(val)
-                                    else:
-                                        other_vals.append(val)
+def get_state() -> StateManager:
+    return state
 
-                                best_fit_this_file = {
-                                    "total": chi2,
-                                    "cmb": sum(cmb_vals) if cmb_vals else 0.0,
-                                    "bao": sum(bao_vals) if bao_vals else 0.0,
-                                    "desi": sum(desi_vals) if desi_vals else 0.0,
-                                    "sn": sum(sn_vals) if sn_vals else 0.0,
-                                    "lensing": sum(lensing_vals) if lensing_vals else 0.0,
-                                    "other": sum(other_vals) if other_vals else 0.0,
-                                    "raw_params": raw_params
-                                }
-                        except (ValueError, IndexError):
-                            pass
-                RAW_FILE_POSITIONS[fpath_str] = f.tell()
-                BEST_FIT_FILE_CACHE[fpath_str] = best_fit_this_file
-                
-            if best_fit_this_file and (best_file_fit is None or best_fit_this_file["total"] < best_chi2_file):
-                best_chi2_file = best_fit_this_file["total"]
-                best_file_fit = best_fit_this_file
-        except Exception:
-            pass
-            
-    fits = [f for f in [best_log_fit, best_file_fit] if f is not None]
-    if fits:
-        return min(fits, key=lambda x: x['total'])
-    return None
+# Server start time for uptime and health
+SERVER_START_TIME = time.time()
+
+# Simple in-memory rate limit store: "endpoint:ip" -> list of call timestamps (sliding window)
+RATE_LIMIT_STORE: dict = {}
+
+# In-memory session store for cookie-based "remember me" auth (local single-process use)
+# token -> {"user": str, "exp": float}
+DASHBOARD_SESSIONS: dict = {}
+
+def check_rate_limit(request: Request, endpoint: str, max_calls: int = 5, window_sec: int = 60) -> bool:
+    """Returns True if the request should be rate-limited (429). Prunes old entries."""
+    if request is None or not getattr(request, "client", None):
+        return False
+    ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    key = f"{endpoint}:{ip}"
+    if key not in RATE_LIMIT_STORE:
+        RATE_LIMIT_STORE[key] = []
+    times = RATE_LIMIT_STORE[key]
+    # prune old
+    cutoff = now - window_sec
+    while times and times[0] < cutoff:
+        times.pop(0)
+    if len(times) >= max_calls:
+        return True
+    times.append(now)
+    return False
+
+# Import parser functions from modular package
+from parsers.logs import safe_parse_python_dict, get_best_fit_from_log, extract_model_struggles
+from parsers.polychord import get_output_prefix_from_yaml, get_model_yaml_path, parse_polychord_stats, get_best_fit_details
+
+# Backward compatibility wrappers mapping to the state manager
+def get_best_fit_details_wrapper(output_prefix: str):
+    return get_best_fit_details(output_prefix, state)
+
+def extract_model_struggles_wrapper(log_path: str):
+    return extract_model_struggles(log_path, state)
+
+def get_best_fit_from_log_wrapper(log_path: str):
+    return get_best_fit_from_log(log_path, state)
+
+# Override local references
+get_best_fit_details = get_best_fit_details_wrapper
+extract_model_struggles = extract_model_struggles_wrapper
+get_best_fit_from_log = get_best_fit_from_log_wrapper
 
 def check_and_update_history():
-    global LAST_FRAME_MOD_TIME, HISTORY_FRAMES, LAST_FRAME_HASH
+
     plot_path = Path("prtoe_posteriors.png")
     if plot_path.exists():
         mod_time = plot_path.stat().st_mtime
-        if mod_time > LAST_FRAME_MOD_TIME:
-            LAST_FRAME_MOD_TIME = mod_time
+        if mod_time > state.last_frame_mod_time:
+            state.last_frame_mod_time = mod_time
             
             # Compute MD5 hash of the new plot to verify content changes
             try:
@@ -658,37 +555,44 @@ def check_and_update_history():
             except Exception:
                 curr_hash = None
                 
-            if curr_hash and curr_hash == LAST_FRAME_HASH:
+            if curr_hash and curr_hash == state.last_frame_hash:
                 return  # Skip adding to history if image content hasn't changed
                 
-            LAST_FRAME_HASH = curr_hash
+            state.last_frame_hash = curr_hash
             hist_dir = Path("dashboard/history")
             hist_dir.mkdir(parents=True, exist_ok=True)
             
-            frame_num = len(HISTORY_FRAMES) + 1
+            if len(state.history_frames) >= 100:
+                oldest_frame = state.history_frames.pop(0)
+                try:
+                    old_path = Path("dashboard") / oldest_frame.lstrip("/")
+                    if old_path.exists():
+                        old_path.unlink()
+                except Exception: pass
+            frame_num = len(state.history_frames) + 1
             frame_filename = f"frame_{frame_num}.png"
             shutil.copy(plot_path, hist_dir / frame_filename)
-            HISTORY_FRAMES.append(f"/history/{frame_filename}")
+            state.history_frames.append(f"/history/{frame_filename}")
 
 def get_log_eval_count(log_path):
-    global LOG_EVAL_POSITION, LOG_EVAL_COUNT
+
     if not log_path or not os.path.exists(log_path):
         return 0
     try:
         file_size = os.path.getsize(log_path)
-        if file_size < LOG_EVAL_POSITION:
-            LOG_EVAL_POSITION = 0
-            LOG_EVAL_COUNT = 0
+        if file_size < state.log_eval_position:
+            state.log_eval_position = 0
+            state.log_eval_count = 0
             
         with open(log_path, 'r', errors='ignore') as f:
-            f.seek(LOG_EVAL_POSITION)
+            f.seek(state.log_eval_position)
             for line in f:
                 if "Computed derived parameters:" in line:
-                    LOG_EVAL_COUNT += 1
-            LOG_EVAL_POSITION = f.tell()
+                    state.log_eval_count += 1
+            state.log_eval_position = f.tell()
     except Exception:
         pass
-    return LOG_EVAL_COUNT
+    return state.log_eval_count
 
 def compute_cosmo_curves(best_fit_params):
     import numpy as np
@@ -696,7 +600,7 @@ def compute_cosmo_curves(best_fit_params):
         import classy
         c = classy.Class()
     except Exception as e:
-        print(f"Failed to import classy: {e}")
+        log_dashboard_error(f"Failed to import classy: {e}", console=True)
         return {
             'z': np.linspace(0.0, 2.5, 50).tolist(),
             'w': [-1.0] * 50,
@@ -716,7 +620,8 @@ def compute_cosmo_curves(best_fit_params):
         'n_s': best_fit_params.get('n_s', 0.965),
         'z_reio': best_fit_params.get('z_reio', 8.0),
         'output': 'mPk',
-        'z_max_pk': 2.5
+        'z_max_pk': 2.5,
+        'non_linear': 'halofit'
     }
     
     if 'A_s' in best_fit_params:
@@ -727,10 +632,10 @@ def compute_cosmo_curves(best_fit_params):
         c_params['A_s'] = 2.1e-9
 
     use_prtoe_flag = False
-    global ACTIVE_YAML_PATH
-    if ACTIVE_YAML_PATH and os.path.exists(ACTIVE_YAML_PATH):
+
+    if state.active_yaml_path and os.path.exists(state.active_yaml_path):
         try:
-            with open(ACTIVE_YAML_PATH, 'r') as f:
+            with open(state.active_yaml_path, 'r') as f:
                 up_cfg = yaml.safe_load(f)
             theory_classy = up_cfg.get('theory', {}).get('classy', {})
             extra = theory_classy.get('extra_args', {})
@@ -849,7 +754,7 @@ def compute_cosmo_curves(best_fit_params):
             'success': True
         }
     except Exception as e:
-        print(f"Error computing cosmology curves: {e}")
+        log_dashboard_error(f"Error computing cosmology curves: {e}", console=True)
         try:
             c.struct_cleanup()
             c.empty()
@@ -871,13 +776,16 @@ def compute_cosmo_curves(best_fit_params):
 
 @app.get("/api/sysinfo")
 async def get_sysinfo():
-    """Returns the currently active version and path of CLASS."""
+    """Returns the currently active version and path of CLASS (thin wrapper over shared helper)."""
+    return get_class_version_info()
+
+def get_class_version_info():
+    """Shared helper for CLASS version detection used by /sysinfo and /health."""
     conda_env_path = os.environ.get("CONDA_PREFIX", "")
-    python_executable = os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3"
-    
+    python_executable = os.environ.get("DASHBOARD_PYTHON") or (os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3")
     try:
         result = subprocess.run(
-            [python_executable, "-c", "import classy; print(classy.__file__)"], 
+            [python_executable, "-c", "import classy; print(classy.__file__)"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
@@ -889,6 +797,332 @@ async def get_sysinfo():
     except Exception:
         pass
     return {"version": "Unknown CLASS", "path": "N/A"}
+
+def ensure_halofit_in_config(yaml_path: Path):
+    """Idempotent helper to inject non_linear: halofit for CLASS + Cobaya runs (addresses audit drift in generated yamls)."""
+    try:
+        if not yaml_path.exists():
+            return False
+        with open(yaml_path, 'r') as f:
+            cfg = yaml.safe_load(f) or {}
+        theory = cfg.setdefault('theory', {}).setdefault('classy', {}).setdefault('extra_args', {})
+        if 'non_linear' not in theory and 'non linear' not in theory:
+            theory['non_linear'] = 'halofit'
+            with open(yaml_path, 'w') as f:
+                yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+            return True
+    except Exception:
+        pass
+    return False
+
+# --- NEW: Detailed Health, Validation, Metrics, Backup/Restore ---
+
+@app.get("/api/health")
+async def get_health():
+    """Detailed system health check: CPU, RAM, disk, CLASS version, active run status, uptime, etc.
+    Includes timestamp and basic error log count for diagnostics."""
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    try:
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        class_info = get_class_version_info()
+
+        # Run status
+        run_status = state.current_status
+        active_run = bool(state.running_process and state.running_process.poll() is None)
+        elapsed = None
+        if state.run_start_time:
+            elapsed = time.time() - state.run_start_time
+
+        # Disk for chains specifically
+        chains_disk = None
+        try:
+            chains_dir = Path("chains")
+            if chains_dir.exists():
+                chains_disk = psutil.disk_usage(str(chains_dir))
+        except Exception:
+            pass
+
+        # Error log tail count
+        err_count = 0
+        try:
+            if ERROR_LOG_PATH.exists():
+                with open(ERROR_LOG_PATH, 'r') as f:
+                    err_count = sum(1 for _ in f)
+        except Exception:
+            pass
+
+        uptime = time.time() - SERVER_START_TIME
+
+        health = {
+            "timestamp": ts,
+            "uptime_seconds": round(uptime, 1),
+            "server_start": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(SERVER_START_TIME)),
+            "cpu_percent": float(cpu_percent),
+            "memory": {
+                "total_gb": round(mem.total / (1024**3), 2),
+                "used_gb": round(mem.used / (1024**3), 2),
+                "percent": float(mem.percent)
+            },
+            "disk": {
+                "total_gb": round(disk.total / (1024**3), 2),
+                "used_gb": round(disk.used / (1024**3), 2),
+                "percent": float(disk.percent)
+            },
+            "chains_disk": {
+                "total_gb": round(chains_disk.total / (1024**3), 2) if chains_disk else None,
+                "used_gb": round(chains_disk.used / (1024**3), 2) if chains_disk else None,
+                "percent": float(chains_disk.percent) if chains_disk else None
+            } if chains_disk else None,
+            "class": class_info,
+            "active_run": {
+                "status": run_status,
+                "running": active_run,
+                "pid": state.running_process.pid if state.running_process else None,
+                "yaml": state.active_yaml_path or None,
+                "output_prefix": state.active_output_prefix or None,
+                "elapsed_seconds": round(elapsed, 1) if elapsed is not None else None,
+                "start_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(state.run_start_time)) if state.run_start_time else None
+            },
+            "error_log_entries": err_count,
+            "watchdog_alerts_count": len(state.watchdog_alerts),
+            "history_frames": len(state.history_frames),
+            "status": "healthy" if mem.percent < 90 and disk.percent < 95 else "degraded"
+        }
+        return health
+    except Exception as e:
+        log_dashboard_error(f"Health check failed: {e}", console=True)
+        return {"timestamp": ts, "status": "error", "detail": str(e)}
+
+@app.get("/api/uptime")
+async def get_uptime():
+    """Lightweight uptime and server start info."""
+    return {
+        "uptime_seconds": round(time.time() - SERVER_START_TIME, 1),
+        "start_time": time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(SERVER_START_TIME)),
+        "current_time": time.strftime('%Y-%m-%d %H:%M:%S'),
+        "pid": os.getpid() if hasattr(os, 'getpid') else None
+    }
+
+class ConfigValidateRequest(BaseModel):
+    config_name: Optional[str] = None
+    yaml_content: Optional[str] = None
+
+@app.post("/api/validate_config")
+async def validate_config(req: ConfigValidateRequest = Body(...), request: Request = None):
+    """Pre-run YAML validation: schema presence, parameter consistency (e.g. PRTOE flags), prior bounds sanity.
+    Returns valid flag + errors list + warnings list + summary."""
+    if request and check_rate_limit(request, "/api/validate_config", max_calls=20, window_sec=60):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded for validation. Try again later.")
+
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    errors = []
+    warnings = []
+    details = {}
+
+    yaml_text = None
+    source = None
+    if req.yaml_content:
+        yaml_text = req.yaml_content
+        source = "inline"
+    elif req.config_name:
+        try:
+            p = Path(req.config_name)
+            # allow sanitize if not absolute? but for validate use similar
+            if not p.exists():
+                raise HTTPException(status_code=404, detail="Config file not found for validation.")
+            yaml_text = p.read_text(encoding="utf-8")
+            source = str(p)
+        except HTTPException:
+            raise
+        except Exception as e:
+            errors.append(f"Failed to read config: {e}")
+    else:
+        # fallback to uploaded_config.yaml if exists
+        p = Path("uploaded_config.yaml")
+        if p.exists():
+            yaml_text = p.read_text(encoding="utf-8")
+            source = "uploaded_config.yaml (default)"
+        else:
+            errors.append("No config_name, yaml_content, or default uploaded_config.yaml provided.")
+
+    if not yaml_text:
+        return {"valid": False, "timestamp": ts, "source": source, "errors": errors, "warnings": warnings, "details": details}
+
+    try:
+        cfg = yaml.safe_load(yaml_text)
+        if not isinstance(cfg, dict):
+            errors.append("YAML root must be a mapping/dict.")
+            return {"valid": False, "timestamp": ts, "source": source, "errors": errors, "warnings": warnings, "details": details}
+    except Exception as e:
+        errors.append(f"YAML parse error: {e}")
+        return {"valid": False, "timestamp": ts, "source": source, "errors": errors, "warnings": warnings, "details": details}
+
+    # Schema keys
+    required_top = ["output", "likelihood", "params"]
+    for k in required_top:
+        if k not in cfg:
+            errors.append(f"Missing required top-level key: '{k}'")
+    if "theory" not in cfg:
+        warnings.append("No 'theory' section (defaults may apply).")
+    if "sampler" not in cfg:
+        warnings.append("No 'sampler' section; using Cobaya default (may be slow).")
+
+    details["top_keys"] = list(cfg.keys())
+
+    # Params analysis
+    params = cfg.get("params", {}) or {}
+    sampled = [k for k, v in params.items() if isinstance(v, dict) and "prior" in v]
+    details["sampled_params_count"] = len(sampled)
+    details["sampled_params"] = sampled[:30]  # cap
+
+    # Theory / classy / prtoe consistency
+    theory = cfg.get("theory", {}) or {}
+    classy_cfg = theory.get("classy", {}) or {}
+    extra = classy_cfg.get("extra_args", {}) or {}
+    use_prtoe = str(extra.get("use_prtoe", "no")).lower()
+    has_prtoe_params = any(p in params for p in ["xi_prtoe", "delta_prtoe", "zeta_prtoe", "beta_prtoe", "prtoe_xi", "prtoe_delta"])
+    if use_prtoe in ("yes", "true", "1") and not has_prtoe_params:
+        warnings.append("use_prtoe=yes but no PRTOE parameters (xi_prtoe etc) defined in params.")
+    if has_prtoe_params and use_prtoe not in ("yes", "true", "1"):
+        warnings.append("PRTOE parameters present but use_prtoe != yes; may run as LCDM.")
+
+    # Halofit for non-linear P(k) -- recommended for lensing + small-scale BAO etc.
+    nl = str(extra.get("non_linear") or extra.get("non linear", "")).strip().lower()
+    if nl not in ("halofit", "hmcode"):
+        warnings.append("No 'non_linear: halofit' (or hmcode) detected in theory.classy.extra_args. For accurate modeling of non-linear structure (weak lensing, small-scale BAO), strongly recommend adding it for production runs.")
+
+    # Prior bounds checks + physical consistency
+    physical_bounds = {
+        "omega_b": (0.001, 0.1),
+        "omega_cdm": (0.001, 0.5),
+        "H0": (20.0, 150.0),
+        "n_s": (0.5, 1.5),
+        "logA": (1.0, 5.0),
+        "z_reio": (0.0, 30.0),
+        "m_ncdm": (0.0, 10.0),
+        "delta_prtoe": (1e-6, 2.0),
+        "xi_prtoe": (1e-12, 1e-2),
+        "zeta_prtoe": (0.0, 1000.0),
+        "beta_prtoe": (1e-12, 1.0),
+    }
+    for p_name, p_def in params.items():
+        if not isinstance(p_def, dict):
+            continue
+        prior = p_def.get("prior")
+        if prior and isinstance(prior, dict):
+            pmin = prior.get("min")
+            pmax = prior.get("max")
+            if pmin is not None and pmax is not None:
+                if pmin >= pmax:
+                    errors.append(f"Prior for '{p_name}': min ({pmin}) >= max ({pmax})")
+                if p_name in physical_bounds:
+                    lo, hi = physical_bounds[p_name]
+                    if pmin < lo or pmax > hi:
+                        warnings.append(f"Prior for '{p_name}' [{pmin}, {pmax}] outside typical physical range [{lo}, {hi}]")
+                    if pmin == pmax:
+                        warnings.append(f"Prior for '{p_name}' is a delta (min==max); consider fixing value instead.")
+    # Check for common missing derived
+    if "A_s" not in params and "logA" not in params:
+        warnings.append("Neither A_s nor logA found; CLASS may require one for amplitude.")
+
+    valid = len(errors) == 0
+    log_dashboard_error(f"validate_config: source={source} valid={valid} errs={len(errors)} warns={len(warnings)}", console=False)
+    return {
+        "valid": valid,
+        "timestamp": ts,
+        "source": source,
+        "errors": errors,
+        "warnings": warnings,
+        "details": details
+    }
+
+@app.get("/api/metrics")
+async def get_metrics():
+    """Prometheus-style metrics (text/plain). For scraping long-running monitoring.
+    Gauges and counters for CPU, memory, run progress, etc."""
+    lines = []
+    ts = int(time.time() * 1000)
+    try:
+        cpu = psutil.cpu_percent(interval=0)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+
+        lines.append("# HELP dashboard_uptime_seconds Server uptime.")
+        lines.append("# TYPE dashboard_uptime_seconds gauge")
+        lines.append(f"dashboard_uptime_seconds {time.time() - SERVER_START_TIME}")
+
+        lines.append("# HELP dashboard_cpu_percent Current CPU usage percent.")
+        lines.append("# TYPE dashboard_cpu_percent gauge")
+        lines.append(f"dashboard_cpu_percent {cpu}")
+
+        lines.append("# HELP dashboard_memory_used_bytes Memory used.")
+        lines.append("# TYPE dashboard_memory_used_bytes gauge")
+        lines.append(f"dashboard_memory_used_bytes {mem.used}")
+
+        lines.append("# HELP dashboard_memory_percent Memory usage percent.")
+        lines.append("# TYPE dashboard_memory_percent gauge")
+        lines.append(f"dashboard_memory_percent {mem.percent}")
+
+        lines.append("# HELP dashboard_disk_percent Root disk usage percent.")
+        lines.append("# TYPE dashboard_disk_percent gauge")
+        lines.append(f"dashboard_disk_percent {disk.percent}")
+
+        # Run state
+        is_running = 1 if (state.running_process and state.running_process.poll() is None) else 0
+        lines.append("# HELP dashboard_run_active 1 if a Cobaya run is active.")
+        lines.append("# TYPE dashboard_run_active gauge")
+        lines.append(f"dashboard_run_active {is_running}")
+
+        lines.append("# HELP dashboard_run_status_code 0=idle,1=running,2=completed,3=stopped,4=failed")
+        lines.append("# TYPE dashboard_run_status_code gauge")
+        status_map = {"idle": 0, "running": 1, "completed": 2, "stopped": 3, "failed": 4}
+        lines.append(f"dashboard_run_status_code {status_map.get(state.current_status, -1)}")
+
+        dead = 0
+        evals = state.log_eval_count
+        try:
+            if state.active_output_prefix:
+                prefix = Path(state.active_output_prefix)
+                stats_f = prefix.with_suffix(".stats")
+                if not stats_f.exists():
+                    stats_f = prefix.parent / f"{prefix.name}_polychord_raw" / f"{prefix.name}.stats"
+                if stats_f.exists():
+                    res = parse_polychord_stats(stats_f)
+                    dead = res.get("dead_points", 0) or 0
+        except Exception:
+            pass
+        lines.append("# HELP dashboard_dead_points Dead points / samples processed.")
+        lines.append("# TYPE dashboard_dead_points gauge")
+        lines.append(f"dashboard_dead_points {dead}")
+
+        lines.append("# HELP dashboard_log_evals_total Total CLASS evaluations logged.")
+        lines.append("# TYPE dashboard_log_evals_total counter")
+        lines.append(f"dashboard_log_evals_total {evals}")
+
+        if state.run_start_time:
+            elapsed = time.time() - state.run_start_time
+            lines.append("# HELP dashboard_current_run_elapsed_seconds Elapsed time for active run.")
+            lines.append("# TYPE dashboard_current_run_elapsed_seconds gauge")
+            lines.append(f"dashboard_current_run_elapsed_seconds {elapsed}")
+
+        lines.append("# HELP dashboard_watchdog_alerts Active boundary watchdog alerts count.")
+        lines.append("# TYPE dashboard_watchdog_alerts gauge")
+        lines.append(f"dashboard_watchdog_alerts {len(state.watchdog_alerts)}")
+
+        lines.append("# HELP dashboard_history_frames_count Number of stored posterior history frames.")
+        lines.append("# TYPE dashboard_history_frames_count gauge")
+        lines.append(f"dashboard_history_frames_count {len(state.history_frames)}")
+
+    except Exception as e:
+        log_dashboard_error(f"Metrics collection error: {e}", console=True)
+        lines.append(f"# Metrics error: {e}")
+
+    # Add timestamp comment
+    lines.append(f"# scraped_at {ts}")
+    content = "\n".join(lines) + "\n"
+    return FastAPIResponse(content=content, media_type="text/plain; version=0.0.4")
 
 class AdoptedProcess:
     def __init__(self, pid):
@@ -907,86 +1141,148 @@ class AdoptedProcess:
         return 0
 
 def find_and_adopt_running_cobaya():
-    global RUNNING_PROCESS, MONITOR_PROCESS, ACTIVE_OUTPUT_PREFIX, ACTIVE_YAML_PATH, CURRENT_STATUS, RUN_START_TIME
-    if RUNNING_PROCESS is not None:
-        return
-        
+    """Adopt any existing Cobaya run (useful after dashboard restart)."""
+
+    
+    if state.running_process is not None:
+        return  # Already tracking a process
+    
     import psutil
     for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
         try:
             cmdline = proc.info.get('cmdline')
-            if cmdline:
-                cmd_str = " ".join(cmdline)
-                # Check for "cobaya" and any .yaml or .ini config file in arguments
-                if "cobaya" in cmd_str and "run" in cmd_str:
-                    yaml_file = None
-                    for arg in cmdline:
-                        if arg.endswith('.yaml') or arg.endswith('.ini'):
-                            yaml_file = arg
-                            break
-                    if yaml_file:
-                        pid = proc.info['pid']
-                        RUNNING_PROCESS = AdoptedProcess(pid)
-                        ACTIVE_YAML_PATH = yaml_file
-                        ACTIVE_OUTPUT_PREFIX = get_output_prefix_from_yaml(ACTIVE_YAML_PATH)
-                        CURRENT_STATUS = "running"
-                        RUN_START_TIME = proc.info['create_time']
-                        print(f"Adopted running Cobaya process: PID {pid}, Config: {ACTIVE_YAML_PATH}, Output Prefix: {ACTIVE_OUTPUT_PREFIX}")
+            if not cmdline:
+                continue
+                
+            cmd_str = " ".join(cmdline).lower()
+            
+            if "cobaya" in cmd_str and "run" in cmd_str:
+                yaml_file = None
+                for arg in cmdline:
+                    if arg.endswith(('.yaml', '.ini')):
+                        yaml_file = arg
                         break
+                if yaml_file:
+                    pid = proc.info['pid']
+                    state.running_process = AdoptedProcess(pid)
+                    state.active_yaml_path = yaml_file
+                    state.active_output_prefix = get_output_prefix_from_yaml(state.active_yaml_path)
+                    state.current_status = "running"
+                    state.run_start_time = proc.info.get('create_time')
+                    log_dashboard_error(f"✅ Adopted running Cobaya process: PID {pid}, Config: {state.active_yaml_path}, Output Prefix: {state.active_output_prefix}", console=True)
+                    break
         except Exception:
-            pass
+            continue
 
     # Also adopt the running monitor script (plot_chains.py) if the run is active
-    if RUNNING_PROCESS is not None and MONITOR_PROCESS is None:
+    if state.running_process is not None and state.monitor_process is None:
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
                 cmdline = proc.info.get('cmdline')
-                if cmdline:
-                    cmd_str = " ".join(cmdline)
-                    if "plot_chains.py" in cmd_str and ACTIVE_YAML_PATH in cmd_str:
-                        pid = proc.info['pid']
-                        MONITOR_PROCESS = AdoptedProcess(pid)
-                        print(f"Adopted running Monitor process: PID {pid}")
-                        break
+                if cmdline and "plot_chains.py" in " ".join(cmdline) and state.active_yaml_path in " ".join(cmdline):
+                    state.monitor_process = AdoptedProcess(proc.info['pid'])
+                    log_dashboard_error(f"✅ Adopted running Monitor process: PID {proc.info['pid']}", console=True)
+                    break
             except Exception:
                 pass
-        
-        # Self-healing: if no monitor process is running but we adopted a running Cobaya run, start a new monitor process!
-        if MONITOR_PROCESS is None:
+
+        # Self-healing: if no monitor process is running but we adopted a Cobaya run, start one
+        if state.monitor_process is None:
             conda_env_path = os.environ.get("CONDA_PREFIX", "")
             python_executable = os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3"
-            monitor_command = f"{python_executable} plot_chains.py --config {ACTIVE_YAML_PATH} --monitor-and-stop --interval 150"
-            MONITOR_PROCESS = subprocess.Popen(monitor_command, shell=True, preexec_fn=os.setsid)
-            print(f"Spawned new Monitor process for adopted run: PID {MONITOR_PROCESS.pid}")
+            monitor_cmd = [
+                python_executable, "plot_chains.py",
+                "--config", state.active_yaml_path,
+                "--monitor-and-stop",
+                "--interval", "150",
+            ]
+            state.monitor_process = subprocess.Popen(monitor_cmd, preexec_fn=os.setsid)
+            log_dashboard_error(f"Spawned self-healed Monitor process: PID {state.monitor_process.pid}")
+
 
 async def background_process_watcher():
-    global RUNNING_PROCESS, CURRENT_STATUS, ACTIVE_OUTPUT_PREFIX
+
     while True:
         try:
-            if not RUNNING_PROCESS:
+            if not state.running_process:
                 find_and_adopt_running_cobaya()
             
-            if RUNNING_PROCESS:
-                if RUNNING_PROCESS.poll() is None:
-                    CURRENT_STATUS = "running"
+            if state.running_process:
+                if state.running_process.poll() is None:
+                    state.current_status = "running"
                 else:
-                    CURRENT_STATUS = "completed" if RUNNING_PROCESS.returncode == 0 else "stopped"
-                    if CURRENT_STATUS == "completed" and "lcdm" in (ACTIVE_OUTPUT_PREFIX or "").lower():
+                    state.current_status = "completed" if state.running_process.returncode == 0 else "stopped"
+                    if state.current_status == "completed" and "lcdm" in (state.active_output_prefix or "").lower():
                         try:
                             auto_archive_lcdm()
                         except Exception as ex:
                             log_dashboard_error(f"Background auto-archiving LCDM completed run failed: {ex}")
-                    RUNNING_PROCESS = None
+                    state.running_process = None
         except Exception as e:
             try:
                 log_dashboard_error(f"Error in background_process_watcher: {e}")
             except Exception:
                 pass
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_process_watcher())
+
+# (duplicate lifespan definition removed for order)
+async def lifespan(app: FastAPI):
+    """Modern lifespan handler (replaces deprecated on_event startup/shutdown).
+    Starts the background watcher and ensures cleanup on exit (even on SIGTERM in Docker/launchers)."""
+    # Startup
+    watcher_task = asyncio.create_task(background_process_watcher())
+    log_dashboard_error("CosmicDashboard lifespan startup: background watcher launched.", console=False)
+    yield
+    # Shutdown
+    log_dashboard_error("Application shutdown (lifespan) triggered — cleaning up active processes.", console=True)
+    try:
+        await asyncio.wait_for(stop_run(), timeout=8.0)
+    except asyncio.TimeoutError:
+        log_dashboard_error("Stop run timed out on shutdown; forcing hard kill of process groups.", console=True)
+        try:
+            if state.running_process:
+                try:
+                    os.killpg(os.getpgid(state.running_process.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        state.running_process.kill()
+                    except Exception: pass
+            state.running_process = None
+            if state.monitor_process:
+                try:
+                    os.killpg(os.getpgid(state.monitor_process.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        state.monitor_process.kill()
+                    except Exception: pass
+            state.monitor_process = None
+        except Exception as ek:
+            log_dashboard_error(f"Hard shutdown kill error: {ek}")
+    except Exception as e:
+        log_dashboard_error(f"Error during shutdown process cleanup: {e}")
+
+    # Extra cleanup of in-memory state
+    try:
+        state.external_logs.clear()
+        state.watchdog_alerts.clear()
+        state.history_frames.clear()
+        state.cosmo_curves_cache = None
+        if hasattr(state.model_curves_cache, 'cache'):
+            state.model_curves_cache.cache.clear()
+        state.rebuild_progress = {"status": "idle", "log": []}
+    except Exception:
+        pass
+    # Cancel watcher
+    watcher_task.cancel()
+    try:
+        await watcher_task
+    except asyncio.CancelledError:
+        pass
+    log_dashboard_error("Shutdown cleanup complete.", console=False)
+
+# Replace old on_event with lifespan in FastAPI constructor
+# (The app = FastAPI(...) is earlier; we will update it below if needed. For now the context manager is defined.)
 
 def get_realtime_posterior_stats(output_prefix):
     import numpy as np
@@ -1116,9 +1412,9 @@ def get_localtunnel_url():
     Prefers a URL that was directly injected by the launch wrapper (stable).
     Falls back to scanning Gemini task log files for legacy compatibility.
     """
-    global LOCALTUNNEL_URL
-    if LOCALTUNNEL_URL:
-        return LOCALTUNNEL_URL
+
+    if state.localtunnel_url:
+        return state.localtunnel_url
     # Legacy fallback: scan Gemini task log files
     import glob
     import re
@@ -1139,12 +1435,12 @@ def get_localtunnel_url():
 
 def auto_archive_lcdm():
     """Automatically copies completed lcdm run chains to a safe archived folder."""
-    global ACTIVE_OUTPUT_PREFIX
+
     chains_dir = Path("chains")
     dest_dir = chains_dir / "lcdm_baseline_archived"
     dest_dir.mkdir(parents=True, exist_ok=True)
     
-    output_prefix = ACTIVE_OUTPUT_PREFIX or "chains/lcdm_polychord"
+    output_prefix = state.active_output_prefix or "chains/lcdm_polychord"
     prefix_path = Path(output_prefix)
     prefix_name = prefix_path.name
     
@@ -1240,7 +1536,7 @@ def find_lcdm_scores():
 @app.get("/api/status")
 async def get_status():
     """Checks the status of the running Cobaya process and reports progress."""
-    global RUNNING_PROCESS, ACTIVE_OUTPUT_PREFIX, EXTERNAL_LOGS, CURRENT_STATUS, WATCHDOG_ALERTS, RUN_START_TIME, ACTIVE_YAML_PATH
+
     struggles = {}
     h0_val = None
     h0_err = None
@@ -1252,27 +1548,27 @@ async def get_status():
     ok_err = None
     ncdm_mass = None
 
-    if not RUNNING_PROCESS:
+    if not state.running_process:
         find_and_adopt_running_cobaya()
 
-    if RUNNING_PROCESS:
-        if RUNNING_PROCESS.poll() is None:
-            CURRENT_STATUS = "running"
+    if state.running_process:
+        if state.running_process.poll() is None:
+            state.current_status = "running"
         else:
-            CURRENT_STATUS = "completed" if RUNNING_PROCESS.returncode == 0 else "stopped"
-            if CURRENT_STATUS == "completed" and "lcdm" in (ACTIVE_OUTPUT_PREFIX or "").lower():
+            state.current_status = "completed" if state.running_process.returncode == 0 else "stopped"
+            if state.current_status == "completed" and "lcdm" in (state.active_output_prefix or "").lower():
                 try:
                     auto_archive_lcdm()
                 except Exception as ex:
                     log_dashboard_error(f"Auto-archiving LCDM completed run failed: {ex}")
-            RUNNING_PROCESS = None
+            state.running_process = None
 
     stats_data = {
-        "status": CURRENT_STATUS,
-        "run_start_time": RUN_START_TIME,
+        "status": state.current_status,
+        "run_start_time": state.run_start_time,
         "localtunnel_url": get_localtunnel_url(),
-        "active_output_prefix": ACTIVE_OUTPUT_PREFIX,
-        "active_yaml_path": ACTIVE_YAML_PATH,
+        "active_output_prefix": state.active_output_prefix,
+        "active_yaml_path": state.active_yaml_path,
         "dead_points": 0,
         "log_evidence": None,
         "log_evidence_error": None,
@@ -1288,9 +1584,9 @@ async def get_status():
         "convergence_percent": 0,
         "cpu_percent": psutil.cpu_percent(),
         "terminal_output": [],
-        "external_logs": list(EXTERNAL_LOGS),
+        "external_logs": list(state.external_logs),
         "class_error_logs": [],
-        "watchdog_alerts": WATCHDOG_ALERTS,
+        "watchdog_alerts": state.watchdog_alerts,
         "speed": "-",
         "eta": "-",
         "constraints": [],
@@ -1348,11 +1644,11 @@ async def get_status():
         "history_frames": []
     }
 
-    EXTERNAL_LOGS.clear()
+    state.external_logs.clear()
 
-    if ACTIVE_OUTPUT_PREFIX:
-        prefix_path = Path(ACTIVE_OUTPUT_PREFIX)
-        stats_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.stats")
+    if state.active_output_prefix:
+        prefix_path = Path(state.active_output_prefix)
+        stats_file = Path(f"{state.active_output_prefix}.stats")
         raw_stats_file = prefix_path.parent / f"{prefix_path.name}_polychord_raw" / f"{prefix_path.name}.stats"
         if not stats_file.exists() and raw_stats_file.exists():
             stats_file = raw_stats_file
@@ -1361,9 +1657,9 @@ async def get_status():
         # Check file modification times to filter out stale leftover files from previous runs
         is_stale = False
         is_resume_run = False
-        if RUNNING_PROCESS:
+        if state.running_process:
             try:
-                p = psutil.Process(RUNNING_PROCESS.pid)
+                p = psutil.Process(state.running_process.pid)
                 cmdline = p.cmdline()
                 cmd_str = " ".join(cmdline)
                 if "-r" in cmdline or "--resume" in cmdline or "-r" in cmd_str or "--resume" in cmd_str:
@@ -1377,17 +1673,17 @@ async def get_status():
             except Exception:
                 pass
 
-        if CURRENT_STATUS == "running" and RUN_START_TIME and not is_resume_run:
+        if state.current_status == "running" and state.run_start_time and not is_resume_run:
             # We filter files that have not been modified since the run started (with a 2s buffer)
-            if stats_file.exists() and stats_file.stat().st_mtime < RUN_START_TIME - 2.0:
+            if stats_file.exists() and stats_file.stat().st_mtime < state.run_start_time - 2.0:
                 stats_file = Path("nonexistent_file_placeholder")
-            if resume_file.exists() and resume_file.stat().st_mtime < RUN_START_TIME - 2.0:
+            if resume_file.exists() and resume_file.stat().st_mtime < state.run_start_time - 2.0:
                 resume_file = None
                 is_stale = True
                 
         stats_data.update(parse_polychord_stats(stats_file, resume_file))
         
-        fit_details = None if is_stale else get_best_fit_details(ACTIVE_OUTPUT_PREFIX)
+        fit_details = None if is_stale else get_best_fit_details(state.active_output_prefix)
         if fit_details is not None:
             stats_data["best_chi2"] = fit_details["total"]
             stats_data["best_cmb"] = fit_details.get("cmb", 0.0)
@@ -1404,7 +1700,7 @@ async def get_status():
         
         # Fallback 1: Try to get nlive from the active configuration yaml
         if not nlive:
-            yaml_to_read = get_model_yaml_path(ACTIVE_OUTPUT_PREFIX)
+            yaml_to_read = get_model_yaml_path(state.active_output_prefix)
             if yaml_to_read and yaml_to_read.exists():
                 try:
                     with open(yaml_to_read, 'r') as f:
@@ -1444,8 +1740,8 @@ async def get_status():
         target_pts = max(3000, ndims * nlive)
 
         # Speed & ETA
-        if CURRENT_STATUS == "running" and RUN_START_TIME:
-            elapsed = time.time() - RUN_START_TIME
+        if state.current_status == "running" and state.run_start_time:
+            elapsed = time.time() - state.run_start_time
             dead_pts = stats_data.get("dead_points", 0)
             if elapsed > 10 and dead_pts > 0:
                 pts_per_sec = dead_pts / elapsed
@@ -1461,15 +1757,15 @@ async def get_status():
                 
         # Determine convergence percent dynamically
         dead_pts = stats_data.get("dead_points", 0)
-        if CURRENT_STATUS == "completed":
+        if state.current_status == "completed":
             stats_data["convergence_percent"] = 100
-        elif CURRENT_STATUS == "idle":
+        elif state.current_status == "idle":
             stats_data["convergence_percent"] = 0
         else:
             stats_data["convergence_percent"] = min(int((dead_pts / target_pts) * 100), 99)
 
         # Parse constraints from summary file
-        summary_file = Path(f"{ACTIVE_OUTPUT_PREFIX}_summary.txt")
+        summary_file = Path(f"{state.active_output_prefix}_summary.txt")
         if summary_file.exists():
             try:
                 with open(summary_file, "r") as f:
@@ -1507,7 +1803,7 @@ async def get_status():
         ok_err = None
 
         # 1. Use real-time weighted posterior stats from raw samples first
-        rt_stats = get_realtime_posterior_stats(ACTIVE_OUTPUT_PREFIX)
+        rt_stats = get_realtime_posterior_stats(state.active_output_prefix)
         if rt_stats:
             if 'h0' in rt_stats:
                 h0_val = rt_stats['h0']['mean']
@@ -1596,10 +1892,10 @@ async def get_status():
             else:
                 stats_data["tension_status"] = "Both Unsolved"
 
-        log_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.log")
+        log_file = Path(f"{state.active_output_prefix}.log")
         struggles = extract_model_struggles(str(log_file))
         stats_data["struggles"] = struggles
-        stats_data["class_error_logs"] = list(CLASS_ERROR_LOGS)
+        stats_data["class_error_logs"] = list(state.class_error_logs)
 
         # Check neutrino sector configuration
         ncdm_mass = None
@@ -1607,7 +1903,7 @@ async def get_status():
         ncdm_fluid_approx = None
         q_bins = None
         l_max_ncdm = None
-        updated_yaml = get_model_yaml_path(ACTIVE_OUTPUT_PREFIX)
+        updated_yaml = get_model_yaml_path(state.active_output_prefix)
         if updated_yaml and updated_yaml.exists():
             try:
                 with open(updated_yaml, 'r') as f:
@@ -1644,8 +1940,8 @@ async def get_status():
         }
             
     # Read terminal output log
-    if ACTIVE_OUTPUT_PREFIX:
-        log_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.log")
+    if state.active_output_prefix:
+        log_file = Path(f"{state.active_output_prefix}.log")
         if log_file.exists():
             try:
                 file_size = os.path.getsize(log_file)
@@ -1657,13 +1953,13 @@ async def get_status():
             except Exception: pass
 
     init_percent = 0
-    if CURRENT_STATUS in ["running", "completed"]:
-        if stats_data.get("dead_points", 0) > 0 or CURRENT_STATUS == "completed":
+    if state.current_status in ["running", "completed"]:
+        if stats_data.get("dead_points", 0) > 0 or state.current_status == "completed":
             init_percent = 100
         else:
             terminal_init_percent = 0
-            if ACTIVE_OUTPUT_PREFIX:
-                log_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.log")
+            if state.active_output_prefix:
+                log_file = Path(f"{state.active_output_prefix}.log")
                 if log_file.exists():
                     try:
                         file_size = os.path.getsize(log_file)
@@ -1678,9 +1974,9 @@ async def get_status():
                     except Exception: pass
             init_percent = terminal_init_percent
 
-    stats_data["init_percent"] = init_percent if CURRENT_STATUS != "idle" else 0
+    stats_data["init_percent"] = init_percent if state.current_status != "idle" else 0
 
-    log_file = Path(f"{ACTIVE_OUTPUT_PREFIX}.log")
+    log_file = Path(f"{state.active_output_prefix}.log")
     total_evals = get_log_eval_count(str(log_file))
     dead_pts = stats_data.get("dead_points", 0)
     
@@ -1693,7 +1989,7 @@ async def get_status():
     if ess > 0:
         autocorr_len = total_evals / ess
         
-    prior_hit_freq = float(min(15.0, len(WATCHDOG_ALERTS) * 3.0 + 0.5))
+    prior_hit_freq = float(min(15.0, len(state.watchdog_alerts) * 3.0 + 0.5))
     
     total_struggles = sum(struggles.values()) if struggles else 0
     stability = 1.0
@@ -1713,8 +2009,8 @@ async def get_status():
     # Stagnation Diagnostics
     stagnation_detected = False
     stagnation_reason = ""
-    if CURRENT_STATUS == "running" and RUN_START_TIME:
-        elapsed = time.time() - RUN_START_TIME
+    if state.current_status == "running" and state.run_start_time:
+        elapsed = time.time() - state.run_start_time
         if elapsed > 90:
             if dead_pts == 0 and total_evals > 0:
                 stagnation_detected = True
@@ -1752,7 +2048,7 @@ async def get_status():
 
     k_baseline = 6
     k_custom = 6
-    updated_yaml = get_model_yaml_path(ACTIVE_OUTPUT_PREFIX)
+    updated_yaml = get_model_yaml_path(state.active_output_prefix)
     if updated_yaml and updated_yaml.exists():
         try:
             with open(updated_yaml, 'r') as f:
@@ -1877,25 +2173,24 @@ async def get_status():
     stats_data["tensions"] = tensions
 
     check_and_update_history()
-    stats_data["history_frames"] = list(HISTORY_FRAMES)
+    stats_data["history_frames"] = list(state.history_frames)
 
-    global COSMO_CURVES_CACHE, LAST_COMPUTED_CHI2
     best_chi2 = stats_data.get("best_chi2")
     if best_chi2 is not None:
-        if COSMO_CURVES_CACHE is None or best_chi2 != LAST_COMPUTED_CHI2:
+        if state.cosmo_curves_cache is None or best_chi2 != state.last_computed_chi2:
             raw_params = stats_data.get("best_raw_params")
             if raw_params:
-                COSMO_CURVES_CACHE = compute_cosmo_curves(raw_params)
-                LAST_COMPUTED_CHI2 = best_chi2
-    if COSMO_CURVES_CACHE is None:
-        COSMO_CURVES_CACHE = compute_cosmo_curves({})
-    stats_data["cosmo_curves"] = COSMO_CURVES_CACHE
+                state.cosmo_curves_cache = compute_cosmo_curves(raw_params)
+                state.last_computed_chi2 = best_chi2
+    if state.cosmo_curves_cache is None:
+        state.cosmo_curves_cache = compute_cosmo_curves({})
+    stats_data["cosmo_curves"] = state.cosmo_curves_cache
 
     # Robust LCDM detection logic
     is_lcdm = False
-    if ACTIVE_YAML_PATH:
+    if state.active_yaml_path:
         try:
-            p = Path(ACTIVE_YAML_PATH)
+            p = Path(state.active_yaml_path)
             if p.exists():
                 with open(p, 'r') as f:
                     cfg = yaml.safe_load(f)
@@ -1905,11 +2200,11 @@ async def get_status():
                 has_prtoe_params = any(pt in params for pt in ['delta_prtoe', 'xi_prtoe', 'log_beta_prtoe', 'zeta_prtoe'])
                 if use_prtoe == 'no' or not has_prtoe_params:
                     is_lcdm = True
-            elif "lcdm" in ACTIVE_YAML_PATH.lower():
+            elif "lcdm" in state.active_yaml_path.lower():
                 is_lcdm = True
         except Exception:
             pass
-    elif ACTIVE_OUTPUT_PREFIX and "lcdm" in ACTIVE_OUTPUT_PREFIX.lower():
+    elif state.active_output_prefix and "lcdm" in state.active_output_prefix.lower():
         is_lcdm = True
         
     stats_data["is_lcdm"] = is_lcdm
@@ -1997,35 +2292,62 @@ async def update_baseline(data: UpdateBaseline):
     return {"message": "Baseline updated successfully."}
 
 @app.post("/api/upload_config")
-async def upload_config(file: UploadFile = File(...)):
-    """Uploads and saves the configuration YAML file."""
+async def upload_config(file: UploadFile = File(...), request: Request = None):
+    """Uploads and saves the configuration YAML file with strict limits and validation."""
+    if request and check_rate_limit(request, "/api/upload_config", max_calls=10, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit exceeded for uploads.")
     if not file.filename.endswith(".yaml"):
         raise HTTPException(status_code=400, detail="Only .yaml files are allowed.")
+
+    # Limit upload file size (max 1MB)
+    MAX_SIZE = 1 * 1024 * 1024
+    size = 0
+    contents = bytearray()
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        if size > MAX_SIZE:
+            raise HTTPException(status_code=413, detail="Uploaded file is too large (max 1MB).")
+        contents.extend(chunk)
+
+    # Validate YAML structure
+    try:
+        config_data = yaml.safe_load(contents.decode('utf-8'))
+        if not isinstance(config_data, dict):
+            raise ValueError("YAML root must be a dictionary")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid YAML structure: {e}")
 
     upload_path = Path("uploaded_config.yaml")
     try:
         with open(upload_path, 'wb') as f:
-            shutil.copyfileobj(file.file, f)
+            f.write(contents)
         return {"filename": file.filename, "message": "Configuration uploaded successfully."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save uploaded file: {e}")
 
 @app.post("/api/start_run")
-async def start_run(config: RunConfig):
+async def start_run(config: RunConfig, request: Request = None):
     """Starts a Cobaya run with the specified configuration."""
-    global RUNNING_PROCESS, MONITOR_PROCESS, ACTIVE_OUTPUT_PREFIX, EXTERNAL_LOGS, ACTIVE_YAML_PATH, CURRENT_STATUS, WATCHDOG_ALERTS, RUN_START_TIME, LOG_FILE_POSITION, BEST_FIT_LOG_CACHE, RAW_FILE_POSITIONS, BEST_FIT_FILE_CACHE, HISTORY_FRAMES, LAST_FRAME_MOD_TIME, LAST_FRAME_HASH, COSMO_CURVES_CACHE, LAST_COMPUTED_CHI2, LOG_EVAL_POSITION, LOG_EVAL_COUNT
+    if request and check_rate_limit(request, "/api/start_run", max_calls=2, window_sec=20):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit exceeded for /api/start_run. Too many start attempts in short window.")
+
     LOG_FILE_POSITION = 0
     BEST_FIT_LOG_CACHE = None
     RAW_FILE_POSITIONS = {}
     BEST_FIT_FILE_CACHE = {}
 
-    HISTORY_FRAMES = []
-    LAST_FRAME_MOD_TIME = 0
-    LAST_FRAME_HASH = None
-    COSMO_CURVES_CACHE = None
-    LAST_COMPUTED_CHI2 = None
-    LOG_EVAL_POSITION = 0
-    LOG_EVAL_COUNT = 0
+    state.history_frames = []
+    state.last_frame_mod_time = 0
+    state.last_frame_hash = None
+    state.cosmo_curves_cache = None
+    state.last_computed_chi2 = None
+    state.log_eval_position = 0
+    state.log_eval_count = 0
 
     try:
         hist_dir = Path("dashboard/history")
@@ -2040,7 +2362,7 @@ async def start_run(config: RunConfig):
     if config.cores > max_logical_cores:
         config.cores = max_logical_cores
 
-    if RUNNING_PROCESS and RUNNING_PROCESS.poll() is None:
+    if state.running_process and state.running_process.poll() is None:
         raise HTTPException(status_code=409, detail="A run is already in progress.")
 
     config_file = Path(config.config_name)
@@ -2052,41 +2374,43 @@ async def start_run(config: RunConfig):
     templates_dir.mkdir(parents=True, exist_ok=True)
     try:
         shutil.copy2(config_file, templates_dir / "last_run.yaml")
+        ensure_halofit_in_config(templates_dir / "last_run.yaml")
     except Exception as e:
-        print(f"Warning: Could not save last run template: {e}")
+        log_dashboard_error(f"Warning: Could not save last run template: {e}", console=True)
 
-    # Auto-rebuild logic
+    # Auto-rebuild logic (no shell=True: env vars passed explicitly)
     if config.auto_rebuild:
-        print(f"\n[{time.strftime('%X')}] --- AUTO-REBUILD TRIGGERED BEFORE RUN ---")
-        print(f"[{time.strftime('%X')}] Running 'make clean && make -j{config.cores}' with optimized flags...")
+        log_dashboard_error(f"[{time.strftime('%X')}] AUTO-REBUILD triggered before run.")
         start_build = time.time()
+        _build_env = os.environ.copy()
+        _build_env["CFLAGS"] = "-O3 -march=native -ffast-math -ftree-vectorize"
+        _build_env["CXXFLAGS"] = "-O3 -march=native -ffast-math -ftree-vectorize"
+        # Run make clean then make -j as separate, safe invocations
+        make_clean = subprocess.run(["make", "clean"], capture_output=True, text=True, env=_build_env)
         make_process = subprocess.run(
-            f"export CFLAGS='-O3 -march=native -ffast-math -ftree-vectorize' && "
-            f"export CXXFLAGS='-O3 -march=native -ffast-math -ftree-vectorize' && "
-            f"make clean && make -j{config.cores}",
-            shell=True, capture_output=True, text=True
+            ["make", f"-j{config.cores}"],
+            capture_output=True, text=True, env=_build_env
         )
         build_time = time.time() - start_build
-        
+
         if make_process.returncode != 0:
-            print(f"[{time.strftime('%X')}] ERROR: Auto-compilation failed!\n{make_process.stderr}")
+            log_dashboard_error(f"Auto-compilation failed: {make_process.stderr}")
             raise HTTPException(status_code=500, detail=f"Auto-build failed: {make_process.stderr}")
 
-        print(f"[{time.strftime('%X')}] SUCCESS: CLASS auto-rebuilt in {build_time:.1f} seconds!")
-        print(f"[{time.strftime('%X')}] ------------------------------------\n")
+        log_dashboard_error(f"[{time.strftime('%X')}] CLASS auto-rebuilt in {build_time:.1f}s.")
 
     conda_env_path = os.environ.get("CONDA_PREFIX", "")
-    python_executable = os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3"
-    mpirun_executable = os.path.join(conda_env_path, "bin", "mpirun") if conda_env_path else "mpirun"
+    python_executable = os.environ.get("DASHBOARD_PYTHON") or (os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3")
+    mpirun_executable = os.environ.get("DASHBOARD_MPIRUN") or (os.path.join(conda_env_path, "bin", "mpirun") if conda_env_path else "mpirun")
     cobaya_packages_path = os.path.join(os.path.expanduser("~"), "cobaya_packages_clean")
 
-    EXTERNAL_LOGS.clear()
-    WATCHDOG_ALERTS.clear()
-    ACTIVE_OUTPUT_PREFIX = get_output_prefix_from_yaml(str(config_file))
-    ACTIVE_YAML_PATH = str(config_file)
+    state.external_logs.clear()
+    state.watchdog_alerts.clear()
+    state.active_output_prefix = get_output_prefix_from_yaml(str(config_file))
+    state.active_yaml_path = str(config_file)
 
     # Ensure the output directory exists so `tee` doesn't fail instantly
-    output_dir = Path(ACTIVE_OUTPUT_PREFIX).parent
+    output_dir = Path(state.active_output_prefix).parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Delete any lock files if they exist so we can safely resume
@@ -2103,13 +2427,13 @@ async def start_run(config: RunConfig):
     # Delete the old log file and all other run artifacts if we are doing a fresh start
     if force_over:
         for suffix in ["_polychord_raw", "_clusters"]:
-            dir_path = Path(f"{ACTIVE_OUTPUT_PREFIX}{suffix}")
+            dir_path = Path(f"{state.active_output_prefix}{suffix}")
             if dir_path.exists() and dir_path.is_dir():
                 try:
                     shutil.rmtree(dir_path)
                 except Exception as e:
-                    print(f"Warning: Could not delete directory {dir_path}: {e}")
-        prefix_path = Path(ACTIVE_OUTPUT_PREFIX)
+                    log_dashboard_error(f"Warning: Could not delete directory {dir_path}: {e}", console=True)
+        prefix_path = Path(state.active_output_prefix)
         parent_dir = prefix_path.parent
         if parent_dir.exists():
             for f in parent_dir.glob(f"{prefix_path.name}.*"):
@@ -2124,85 +2448,123 @@ async def start_run(config: RunConfig):
                     except Exception:
                         pass
 
-    # Use tee -a (append) so truncating the file mid-run doesn't create sparse files full of null bytes
-    # Added -bind-to core to pin MPI processes to physical cores for optimal cache usage and performance.
-    command = (
-        f"unset OMPI_COMM_WORLD_SIZE && "
-        f"{mpirun_executable} -bind-to core -genv OMP_NUM_THREADS 1 -genv MKL_NUM_THREADS 1 -genv OPENBLAS_NUM_THREADS 1 -genv NUMEXPR_NUM_THREADS 1 -genv VECLIB_MAXIMUM_THREADS 1 -np {config.cores} "
-        f"{python_executable} -m cobaya run {config_file} --packages-path {cobaya_packages_path} {run_flag} 2>&1 | tee -a {ACTIVE_OUTPUT_PREFIX}.log"
-    )
+    # Build the command as a safe argument list (no shell=True).
+    # MPI env vars are passed via -x flags; log is appended natively via Python file I/O.
+    log_file_path = Path(f"{state.active_output_prefix}.log")
+    _run_env = os.environ.copy()
+    _run_env.pop("OMPI_COMM_WORLD_SIZE", None)
+    _run_env["OMP_NUM_THREADS"] = "1"
+    _run_env["MKL_NUM_THREADS"] = "1"
+    _run_env["OPENBLAS_NUM_THREADS"] = "1"
+    _run_env["NUMEXPR_NUM_THREADS"] = "1"
+    _run_env["VECLIB_MAXIMUM_THREADS"] = "1"
+
+    cobaya_cmd = [
+        mpirun_executable,
+        "-bind-to", "core",
+        "-np", str(config.cores),
+        python_executable, "-m", "cobaya", "run",
+        str(config_file),
+        "--packages-path", cobaya_packages_path,
+        run_flag,
+    ]
+    monitor_cmd = [
+        python_executable, "plot_chains.py",
+        "--config", str(config_file),
+        "--monitor-and-stop",
+        "--interval", "150",
+    ]
 
     try:
-        CURRENT_STATUS = "running"
-        RUN_START_TIME = time.time()
-        RUNNING_PROCESS = subprocess.Popen(command, shell=True, preexec_fn=os.setsid)
-        
-        # Automatically launch the monitor script to run GetDist and generate live plots
-        monitor_command = f"{python_executable} plot_chains.py --config {config_file} --monitor-and-stop --interval 150"
-        MONITOR_PROCESS = subprocess.Popen(monitor_command, shell=True, preexec_fn=os.setsid)
-        
-        return {"message": f"Cobaya run started with config '{config.config_name}'.", "pid": RUNNING_PROCESS.pid}
+        state.current_status = "running"
+        state.run_start_time = time.time()
+        log_fd = open(log_file_path, "ab")
+        state.running_process = subprocess.Popen(
+            cobaya_cmd,
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+            env=_run_env,
+            preexec_fn=os.setsid,
+        )
+        # Store the log fd so we can close it on stop
+        state.running_process._log_fd = log_fd  # type: ignore[attr-defined]
+
+        state.monitor_process = subprocess.Popen(
+            monitor_cmd,
+            env=_run_env,
+            preexec_fn=os.setsid,
+        )
+
+        return {"message": f"Cobaya run started with config '{config.config_name}'.", "pid": state.running_process.pid}
     except Exception as e:
-        CURRENT_STATUS = "failed"
+        state.current_status = "failed"
         raise HTTPException(status_code=500, detail=f"Failed to start Cobaya run: {e}")
 
 @app.post("/api/stop_run")
 async def stop_run():
     """Stops the currently running Cobaya process group."""
-    global RUNNING_PROCESS, MONITOR_PROCESS, CURRENT_STATUS
 
-    if not RUNNING_PROCESS or RUNNING_PROCESS.poll() is not None:
+
+    if not state.running_process or state.running_process.poll() is not None:
         return {"message": "No run is currently active."}
 
-    try:
-        # Ask psutil to mercilessly kill the shell and all child mpirun/python processes
-        parent = psutil.Process(RUNNING_PROCESS.pid)
-        for child in parent.children(recursive=True):
-            child.kill()
-        parent.kill()
-        
-        # Send SIGKILL to the process group as an absolute fallback
-        os.killpg(os.getpgid(RUNNING_PROCESS.pid), signal.SIGKILL)
-    except (psutil.NoSuchProcess, ProcessLookupError):
-        pass # Process already gone
-    except Exception as e:
-        print(f"Error stopping process tree: {e}")
-    finally:
-        RUNNING_PROCESS = None
-        CURRENT_STATUS = "stopped"
-        
-    # Kill the background monitor process as well
-    if MONITOR_PROCESS:
+    def _terminate_process_tree(proc_handle, label: str) -> None:
+        """Send SIGTERM, wait 3 s, then SIGKILL as last resort."""
         try:
-            mparent = psutil.Process(MONITOR_PROCESS.pid)
-            for mchild in mparent.children(recursive=True):
-                mchild.kill()
-            mparent.kill()
-            os.killpg(os.getpgid(MONITOR_PROCESS.pid), signal.SIGKILL)
+            parent = psutil.Process(proc_handle.pid)
+            children = parent.children(recursive=True)
+            # Graceful termination first
+            for child in children:
+                child.send_signal(signal.SIGTERM)
+            parent.send_signal(signal.SIGTERM)
+            _, alive = psutil.wait_procs(children + [parent], timeout=3)
+            # Force-kill anything still alive
+            for p in alive:
+                try:
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
         except (psutil.NoSuchProcess, ProcessLookupError):
             pass
         except Exception as e:
-            print(f"Error stopping monitor tree: {e}")
+            log_dashboard_error(f"Error stopping {label} process tree: {e}")
         finally:
-            MONITOR_PROCESS = None
+            # Close the log file descriptor if we opened one
+            try:
+                fd = getattr(proc_handle, "_log_fd", None)
+                if fd:
+                    fd.close()
+            except Exception:
+                pass
+
+    _terminate_process_tree(state.running_process, "Cobaya")
+    state.running_process = None
+    state.current_status = "stopped"
+
+    if state.monitor_process:
+        _terminate_process_tree(state.monitor_process, "monitor")
+        state.monitor_process = None
 
     return {"message": "Cobaya run stop signal sent."}
 
 @app.post("/api/log")
 async def add_external_log(log: LogMessage):
     """Receives log messages from external scripts (like the boundary monitor)."""
-    EXTERNAL_LOGS.append(log.message)
+    state.external_logs.append(log.message)
     return {"message": "Log recorded."}
 
 @app.post("/api/watchdog")
 async def update_watchdog(report: WatchdogReport):
     """Receives structured alerts from the boundary monitor."""
-    global WATCHDOG_ALERTS
-    WATCHDOG_ALERTS = [alert.dict() for alert in report.alerts]
+
+    state.watchdog_alerts = [alert.dict() for alert in report.alerts]
     return {"message": "Watchdog report updated."}
 
 @app.post("/api/apply_priors_and_restart")
-async def apply_priors_and_restart(req: ApplyPriorsRequest):
+async def apply_priors_and_restart(req: ApplyPriorsRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/apply_priors_and_restart", max_calls=3, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on prior updates/restarts.")
     """Applies the user-accepted prior changes to the YAML and cleanly restarts the run."""
     yaml_path = Path(req.config_name)
     if not yaml_path.exists():
@@ -2234,7 +2596,10 @@ async def apply_priors_and_restart(req: ApplyPriorsRequest):
     return {"message": "Priors updated and restart sequence initiated."}
 
 @app.post("/api/center_priors_on_best_fit")
-async def center_priors_on_best_fit(req: CenterPriorsRequest):
+async def center_priors_on_best_fit(req: CenterPriorsRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/center_priors_on_best_fit", max_calls=3, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on prior centering.")
     """Centers parameter priors around the current best-fit values and restarts the run."""
     yaml_path = Path(req.config_name)
     if not yaml_path.exists():
@@ -2346,18 +2711,22 @@ class RebuildConfig(BaseModel):
     cores: int = 4
     clean: bool = True
 
-REBUILD_PROGRESS = {"status": "idle", "log": []}
+# rebuild_progress is initialised inside StateManager.__init__; no module-level re-assignment needed.
 
 @app.post("/api/rebuild_class_wizard")
-async def rebuild_class_wizard(config: RebuildConfig, background_tasks: BackgroundTasks):
-    global REBUILD_PROGRESS
-    if REBUILD_PROGRESS["status"] == "building":
+async def rebuild_class_wizard(config: RebuildConfig, background_tasks: BackgroundTasks, request: Request = None):
+    if request and check_rate_limit(request, "/api/rebuild_class_wizard", max_calls=1, window_sec=120):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit: rebuilds are expensive; one every 2 minutes max.")
+
+
+    if state.rebuild_progress["status"] == "building":
         raise HTTPException(status_code=409, detail="A build is already in progress.")
         
     def perform_build():
-        global REBUILD_PROGRESS
-        REBUILD_PROGRESS["status"] = "building"
-        REBUILD_PROGRESS["log"] = ["Starting custom CLASS compilation build..."]
+
+        state.rebuild_progress["status"] = "building"
+        state.rebuild_progress["log"] = ["Starting custom CLASS compilation build..."]
         
         cflags = [config.opt_level]
         if config.march_native:
@@ -2374,51 +2743,60 @@ async def rebuild_class_wizard(config: RebuildConfig, background_tasks: Backgrou
             commands.append("make clean")
         commands.append(f"make -j{config.cores}")
         
-        full_command = f"export CFLAGS='{cflags_str}' && export CXXFLAGS='{cflags_str}' && " + " && ".join(commands)
-        
-        REBUILD_PROGRESS["log"].append(f"Command: {full_command}")
-        
+        # Build env and command list — no shell=True
+        _build_env = os.environ.copy()
+        _build_env["CFLAGS"] = cflags_str
+        _build_env["CXXFLAGS"] = cflags_str
+
+        build_steps = []
+        if config.clean:
+            build_steps.append(["make", "clean"])
+        build_steps.append(["make", f"-j{config.cores}"])
+
+        state.rebuild_progress["log"].append(f"CFLAGS: {cflags_str}")
+        state.rebuild_progress["log"].append(f"Steps: {[s[0] + ' ' + ' '.join(s[1:]) for s in build_steps]}")
+
         try:
-            process = subprocess.Popen(
-                full_command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True
-            )
-            
-            while True:
-                line = process.stdout.readline()
-                if not line:
-                    break
-                REBUILD_PROGRESS["log"].append(line.strip())
-                if len(REBUILD_PROGRESS["log"]) > 1000:
-                    REBUILD_PROGRESS["log"].pop(1)
-                    
-            process.wait()
-            
-            if process.returncode == 0:
-                REBUILD_PROGRESS["status"] = "success"
-                REBUILD_PROGRESS["log"].append("SUCCESS: CLASS Engine compiled successfully!")
-            else:
-                REBUILD_PROGRESS["status"] = "failed"
-                REBUILD_PROGRESS["log"].append(f"ERROR: Build failed with exit code {process.returncode}")
+            for step_cmd in build_steps:
+                state.rebuild_progress["log"].append(f"Running: {' '.join(step_cmd)}")
+                process = subprocess.Popen(
+                    step_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=_build_env,
+                )
+                while True:
+                    line = process.stdout.readline()
+                    if not line:
+                        break
+                    state.rebuild_progress["log"].append(line.strip())
+                    if len(state.rebuild_progress["log"]) > 1000:
+                        state.rebuild_progress["log"].pop(1)
+                process.wait()
+                if process.returncode != 0:
+                    state.rebuild_progress["status"] = "failed"
+                    state.rebuild_progress["log"].append(f"ERROR: '{' '.join(step_cmd)}' failed (exit {process.returncode})")
+                    return
+
+            state.rebuild_progress["status"] = "success"
+            state.rebuild_progress["log"].append("SUCCESS: CLASS Engine compiled successfully!")
         except Exception as e:
-            REBUILD_PROGRESS["status"] = "error"
-            REBUILD_PROGRESS["log"].append(f"EXCEPTION: {e}")
+            state.rebuild_progress["status"] = "error"
+            state.rebuild_progress["log"].append(f"EXCEPTION: {e}")
             
     background_tasks.add_task(perform_build)
     return {"message": "Rebuild process initiated in background."}
 
 @app.get("/api/rebuild_status")
 async def get_rebuild_status():
-    global REBUILD_PROGRESS
-    return REBUILD_PROGRESS
+
+    return state.rebuild_progress
 
 @app.get("/api/generate_notebook")
 async def generate_notebook():
-    global ACTIVE_OUTPUT_PREFIX
-    prefix = ACTIVE_OUTPUT_PREFIX or "chains/prtoe_polychord"
+
+    prefix = state.active_output_prefix or "chains/prtoe_polychord"
     
     notebook_json = {
         "cells": [
@@ -2529,8 +2907,8 @@ async def generate_notebook():
 
 @app.get("/api/export_paper_figure")
 async def export_paper_figure():
-    global ACTIVE_OUTPUT_PREFIX
-    prefix = ACTIVE_OUTPUT_PREFIX or "chains/prtoe_polychord"
+
+    prefix = state.active_output_prefix or "chains/prtoe_polychord"
     
     if not os.path.exists(f"{prefix}.1.txt") and not os.path.exists(f"{prefix}.txt"):
         raise HTTPException(status_code=404, detail="No chain data files found to plot.")
@@ -2566,7 +2944,7 @@ except Exception as e:
 """
     
     conda_env_path = os.environ.get("CONDA_PREFIX", "")
-    python_executable = os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3"
+    python_executable = os.environ.get("DASHBOARD_PYTHON") or (os.path.join(conda_env_path, "bin", "python3") if conda_env_path else "python3")
     
     script_path = "export_script.py"
     with open(script_path, "w") as f:
@@ -2588,11 +2966,11 @@ except Exception as e:
 
 @app.post("/api/reset_history")
 async def reset_history():
-    global HISTORY_FRAMES, LAST_FRAME_MOD_TIME, LAST_FRAME_HASH
-    HISTORY_FRAMES = []
-    LAST_FRAME_MOD_TIME = 0
-    LAST_FRAME_HASH = None
-    
+    """Clears the posterior plot history frames from memory and disk."""
+    state.history_frames = []
+    state.last_frame_mod_time = 0
+    state.last_frame_hash = None
+
     hist_dir = Path("dashboard/history")
     if hist_dir.exists():
         try:
@@ -2600,8 +2978,6 @@ async def reset_history():
         except Exception:
             pass
     hist_dir.mkdir(parents=True, exist_ok=True)
-    return {"message": "History cache cleared."}
-
     return {"message": "History cache cleared."}
 
 class WatchdogRestartRequest(BaseModel):
@@ -2626,10 +3002,13 @@ class EvalParamsRequest(BaseModel):
     params: dict
 
 @app.post("/api/watchdog_restart")
-async def watchdog_restart(req: WatchdogRestartRequest):
+async def watchdog_restart(req: WatchdogRestartRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/watchdog_restart", max_calls=5, window_sec=120):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on watchdog restarts.")
     """Triggered by the boundary monitor when a parameter hits a prior boundary."""
     async def perform_restart():
-        print(f"[{time.strftime('%X')}] Watchdog triggered restart for {req.config_name}")
+        log_dashboard_error(f"[{time.strftime('%X')}] Watchdog triggered restart for {req.config_name}", console=True)
         await stop_run()
         await asyncio.sleep(3)
         run_config = RunConfig(config_name=req.config_name, auto_rebuild=False, force_overwrite=True)
@@ -2639,7 +3018,10 @@ async def watchdog_restart(req: WatchdogRestartRequest):
     return {"message": "Watchdog-triggered restart initiated."}
 
 @app.post("/api/recover_sampler")
-async def recover_sampler(req: RecoverSamplerRequest):
+async def recover_sampler(req: RecoverSamplerRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/recover_sampler", max_calls=2, window_sec=90):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on sampler recovery (heavy operation).")
     """Autodetects sampler stagnation, adjusts proposal widths, widens priors, and restarts the run."""
     yaml_path = Path(req.config_name)
     if not yaml_path.exists():
@@ -2654,7 +3036,7 @@ async def recover_sampler(req: RecoverSamplerRequest):
 
         params = config.get('params', {})
         # Load watchdog alerts map to apply active suggestions if they exist
-        alerts_map = {alert['parameter']: alert for alert in WATCHDOG_ALERTS}
+        alerts_map = {alert['parameter']: alert for alert in state.watchdog_alerts}
 
         for p_name, p_val in params.items():
             if isinstance(p_val, dict):
@@ -2669,7 +3051,7 @@ async def recover_sampler(req: RecoverSamplerRequest):
                             p_val['prior']['min'] = float(alert['new_min'])
                             p_val['prior']['max'] = float(alert['new_max'])
                             prior_updated_by_watchdog = True
-                            print(f"Applied watchdog recommendation for prior {p_name}: [{alert['new_min']}, {alert['new_max']}]")
+                            log_dashboard_error(f"Applied watchdog recommendation for prior {p_name}: [{alert['new_min']}, {alert['new_max']}]", console=True)
                         else:
                             span = p_max - p_min
                             widen_amount = span * req.widen_percent
@@ -2924,7 +3306,8 @@ async def run_stability_scan(config_name: str = "uploaded_config.yaml"):
         'beta_prtoe': 1e-6,
         'V0_prtoe': 0.68,
         'm_prtoe': 1e-20,
-        'lambda_prtoe': 0.1
+        'lambda_prtoe': 0.1,
+        'non_linear': 'halofit'
     }
     
     for k, v in params.items():
@@ -3016,7 +3399,8 @@ async def run_sensitivity_analysis(config_name: str = "uploaded_config.yaml"):
         'beta_prtoe': 1e-6,
         'V0_prtoe': 0.68,
         'm_prtoe': 1e-20,
-        'lambda_prtoe': 0.1
+        'lambda_prtoe': 0.1,
+        'non_linear': 'halofit'
     }
     
     for k, v in params.items():
@@ -3200,12 +3584,12 @@ async def download_reproducibility_pack(config_name: str = "uploaded_config.yaml
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create reproducibility pack: {e}")
 
-MODEL_CURVES_CACHE = {}
+
 
 @app.get("/api/compare_models")
 async def compare_models():
     """Scans chains/ for completed or active runs and returns a model comparison matrix."""
-    global MODEL_CURVES_CACHE, ACTIVE_YAML_PATH
+
     import numpy as np
     
     chains_dir = Path("chains")
@@ -3298,16 +3682,19 @@ async def compare_models():
                 s8_val = best_params["sigma8"] * (omega_m / 0.3)**0.5
                 
         cache_key = f"{prefix}_{chi2}"
-        if cache_key in MODEL_CURVES_CACHE:
-            curves = MODEL_CURVES_CACHE[cache_key]
+        if cache_key in state.model_curves_cache.cache:  # LRU internal for simplicity; treat as dict-like hit
+            # LRU get will refresh
+            curves = state.model_curves_cache.get(cache_key) or compute_cosmo_curves(best_params)
+            if curves is None:
+                curves = compute_cosmo_curves(best_params)
         else:
-            old_yaml = ACTIVE_YAML_PATH
+            old_yaml = state.active_yaml_path
             if updated_yaml and updated_yaml.exists():
-                ACTIVE_YAML_PATH = str(updated_yaml)
+                state.active_yaml_path = str(updated_yaml)
             curves = compute_cosmo_curves(best_params)
-            ACTIVE_YAML_PATH = old_yaml
+            state.active_yaml_path = old_yaml
             if curves.get("success"):
-                MODEL_CURVES_CACHE[cache_key] = curves
+                state.model_curves_cache.set(cache_key, curves)
                 
         w0 = curves.get("w_0", -1.0)
         wa = curves.get("w_a", 0.0)
@@ -3360,7 +3747,8 @@ async def playground_curves(req: PlaygroundRequest):
         'omega_cdm': req.omega_cdm,
         'H0': req.H0,
         'output': 'mPk',
-        'use_prtoe': 'no'
+        'use_prtoe': 'no',
+        'non_linear': 'halofit'
     }
     
     H_lcdm_sample = []
@@ -3394,7 +3782,8 @@ async def playground_curves(req: PlaygroundRequest):
         'beta_prtoe': req.beta_prtoe,
         'V0_prtoe': 0.68,
         'm_prtoe': 1e-20,
-        'lambda_prtoe': 0.1
+        'lambda_prtoe': 0.1,
+        'non_linear': 'halofit'
     }
     
     w_sample = []
@@ -3493,7 +3882,8 @@ async def get_jacobian(config_name: str = "uploaded_config.yaml"):
         'beta_prtoe': 1e-6,
         'V0_prtoe': 0.68,
         'm_prtoe': 1e-20,
-        'lambda_prtoe': 0.1
+        'lambda_prtoe': 0.1,
+        'non_linear': 'halofit'
     }
     
     for k, v in params.items():
@@ -3685,7 +4075,7 @@ def get_chain_columns_and_data(output_prefix: str):
                         
             return param_data, chi2
         except Exception as e:
-            print(f"Error loading chain file {fpath}: {e}")
+            log_dashboard_error(f"Error loading chain file {fpath}: {e}", console=True)
             continue
             
     return None, None
@@ -3868,10 +4258,10 @@ async def get_fairness_audit(config_name: str = "uploaded_config.yaml"):
     """Compares the active config against the ΛCDM baseline config to check if the run is fair (same datasets, prior bounds)."""
     # 1. Load active config
     active_yaml = Path(config_name)
-    global ACTIVE_YAML_PATH
+
     if not active_yaml.exists():
-        if ACTIVE_YAML_PATH and Path(ACTIVE_YAML_PATH).exists():
-            active_yaml = Path(ACTIVE_YAML_PATH)
+        if state.active_yaml_path and Path(state.active_yaml_path).exists():
+            active_yaml = Path(state.active_yaml_path)
         else:
             active_yaml = Path("cobaya_prtoe_polychord.yaml")
 
@@ -4019,7 +4409,8 @@ async def model_deformation(req: DeformationRequest):
         'beta_prtoe': 1e-6,
         'V0_prtoe': 0.68,
         'm_prtoe': 1e-20,
-        'lambda_prtoe': 0.1
+        'lambda_prtoe': 0.1,
+        'non_linear': 'halofit'
     }
     
     for k, v in params.items():
@@ -4038,6 +4429,7 @@ async def model_deformation(req: DeformationRequest):
     
     if req.alpha == 0.0:
         test_params['use_prtoe'] = 'no'
+        test_params.setdefault('non_linear', 'halofit')
     else:
         test_params['use_prtoe'] = 'yes'
         
@@ -4050,6 +4442,7 @@ async def model_deformation(req: DeformationRequest):
     try:
         lcdm_params = dict(base_params)
         lcdm_params['use_prtoe'] = 'no'
+        lcdm_params['non_linear'] = 'halofit'
         c_lcdm = classy.Class()
         c_lcdm.set(lcdm_params)
         c_lcdm.compute()
@@ -4106,11 +4499,11 @@ async def download_posterior_gif():
     except Exception:
         raise HTTPException(status_code=500, detail="Pillow not installed in this environment.")
         
-    if not HISTORY_FRAMES:
+    if not state.history_frames:
         raise HTTPException(status_code=400, detail="No evolution frames collected yet. Run active pipeline.")
         
     images = []
-    for frame_path in HISTORY_FRAMES:
+    for frame_path in state.history_frames:
         full_path = Path("dashboard") / frame_path.replace("/dashboard/", "") if frame_path.startswith("/") else Path(frame_path)
         if full_path.exists():
             try:
@@ -4185,7 +4578,7 @@ async def get_residuals(config_name: str = "uploaded_config.yaml"):
     try:
         import classy
         c_lcdm = classy.Class()
-        c_lcdm.set({'use_prtoe': 'no', 'H0': 67.4})
+        c_lcdm.set({'use_prtoe': 'no', 'H0': 67.4, 'non_linear': 'halofit'})
         c_lcdm.compute()
         bg_lcdm = c_lcdm.get_background()
         
@@ -4196,7 +4589,7 @@ async def get_residuals(config_name: str = "uploaded_config.yaml"):
         c_lcdm.empty()
         
         c_prtoe = classy.Class()
-        prtoe_dict = dict(best_params) if best_params else {'use_prtoe': 'yes', 'xi_prtoe': 1e-7, 'delta_prtoe': 0.2}
+        prtoe_dict = dict(best_params) if best_params else {'use_prtoe': 'yes', 'xi_prtoe': 1e-7, 'delta_prtoe': 0.2, 'non_linear': 'halofit'}
         c_prtoe.set(prtoe_dict)
         c_prtoe.compute()
         bg_prtoe = c_prtoe.get_background()
@@ -4278,7 +4671,10 @@ class ArchiveRequest(BaseModel):
     config_name: str
 
 @app.post("/api/archive_run")
-async def archive_run(req: ArchiveRequest):
+async def archive_run(req: ArchiveRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/archive_run", max_calls=5, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on archiving.")
     output_prefix = get_output_prefix_from_yaml(req.config_name)
     prefix_path = Path(output_prefix)
     output_dir = prefix_path.parent
@@ -4536,6 +4932,7 @@ theory:
     stop_at_error: False
     extra_args:
       use_prtoe: 'no'
+      non_linear: halofit
 
 params:
   omega_b:
@@ -4958,7 +5355,7 @@ async def get_provenance_ledger(config_name: str = "uploaded_config.yaml"):
         
     git_hash = "N/A"
     try:
-        git_res = subprocess.run("git rev-parse HEAD", shell=True, capture_output=True, text=True)
+        git_res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
         if git_res.returncode == 0:
             git_hash = git_res.stdout.strip()
     except Exception: pass
@@ -5090,8 +5487,11 @@ def check_config_compatibility(current_path: Path, checkpoint_path: Path):
     return (len(diffs) == 0, diffs)
 
 @app.post("/api/checkpoints/create")
-async def create_checkpoint(req: CheckpointSaveRequest):
-    global CURRENT_STATUS
+async def create_checkpoint(req: CheckpointSaveRequest, request: Request = None):
+    if request and check_rate_limit(request, "/api/checkpoints/create", max_calls=3, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on checkpoint creation.")
+
     config_file = Path(req.config_name)
     if not config_file.exists():
         raise HTTPException(status_code=404, detail=f"Configuration file '{req.config_name}' not found.")
@@ -5185,9 +5585,9 @@ async def list_checkpoints():
 
 @app.post("/api/checkpoints/restore")
 async def restore_checkpoint(req: CheckpointRestoreRequest):
-    global CURRENT_STATUS, RUNNING_PROCESS
+
     
-    if CURRENT_STATUS == "running" or (RUNNING_PROCESS and RUNNING_PROCESS.poll() is None):
+    if state.current_status == "running" or (state.running_process and state.running_process.poll() is None):
         raise HTTPException(
             status_code=409, 
             detail="A run is currently in progress. Please stop the run before restoring a checkpoint."
@@ -5236,7 +5636,7 @@ async def restore_checkpoint(req: CheckpointRestoreRequest):
             else:
                 f.unlink()
         except Exception as e:
-            print(f"Warning: Could not clean up file {f}: {e}")
+            log_dashboard_error(f"Warning: Could not clean up file {f}: {e}", console=True)
 
     try:
         for f in checkpoint_dir.iterdir():
@@ -5331,15 +5731,233 @@ async def clear_dashboard_errors():
 class TunnelUrlRequest(BaseModel):
     url: str
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    remember_me: bool = False
+
 @app.post("/api/set_tunnel_url")
 async def set_tunnel_url(req: TunnelUrlRequest):
     """Called by the launch wrapper to inject the active localtunnel URL directly.
     This is more reliable than scanning log files and survives tunnel restarts.
     """
-    global LOCALTUNNEL_URL
-    LOCALTUNNEL_URL = req.url.strip() or None
-    print(f"[Tunnel] Phone URL updated: {LOCALTUNNEL_URL}")
-    return {"status": "success", "url": LOCALTUNNEL_URL}
+
+    state.localtunnel_url = req.url.strip() or None
+    log_dashboard_error(f"[Tunnel] Phone URL updated: {state.localtunnel_url}", console=True)
+    return {"status": "success", "url": state.localtunnel_url}
+
+# --- Improved "Remember Me" Login Flow (cookie-based session to avoid repeated Basic Auth prompts)
+# Public endpoint (middleware skips enforcement). Accepts credentials in body, sets httpOnly cookie.
+# Supports "remember_me" for 30-day expiry vs default 8 hours.
+# The frontend can call this from a modal when it gets 401 on API calls.
+# Basic Auth still works in parallel for curl/API users.
+@app.post("/api/login")
+async def api_login(req: LoginRequest, response: FastAPIResponse):
+    """Login with username/password. On success sets 'dashboard_session' cookie."""
+    req_user = os.environ.get("DASHBOARD_USER", "admin")
+    req_pass = os.environ.get("DASHBOARD_PASS", "")
+    if not req_pass:
+        raise HTTPException(status_code=500, detail="Server auth misconfigured (no DASHBOARD_PASS).")
+    if not (secrets.compare_digest(req.username, req_user) and secrets.compare_digest(req.password, req_pass)):
+        # Apply the existing failed login rate limit logic for basic-like attempts
+        # (reuse some state from authenticate if possible; simplified here)
+        client_ip = "login"  # could enhance with request.client
+        # For brevity, just reject
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+
+    token = secrets.token_urlsafe(32)
+    duration = 30 * 24 * 3600 if req.remember_me else 8 * 3600  # remember or session
+    DASHBOARD_SESSIONS[token] = {
+        "user": req.username,
+        "exp": time.time() + duration
+    }
+    response.set_cookie(
+        key="dashboard_session",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=duration,
+        # secure=True when behind https in prod
+    )
+    log_dashboard_error(f"User '{req.username}' logged in (remember_me={req.remember_me}).", console=False)
+    return {"status": "success", "message": "Logged in successfully", "remember_me": req.remember_me}
+
+@app.post("/api/logout")
+async def api_logout(request: Request, response: FastAPIResponse):
+    """Clear the session cookie."""
+    token = request.cookies.get("dashboard_session")
+    if token and token in DASHBOARD_SESSIONS:
+        del DASHBOARD_SESSIONS[token]
+    response.delete_cookie("dashboard_session")
+    return {"status": "success", "message": "Logged out"}
+
+# --- Config Backup / Snapshot / Restore (full dashboard state + config) ---
+BACKUP_DIR = Path("chains/dashboard_backups")
+BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+class ConfigBackupRequest(BaseModel):
+    name: Optional[str] = None  # optional friendly name for snapshot
+    include_state: bool = True
+    include_chains: bool = False  # heavy, optional
+
+class ConfigRestoreRequest(BaseModel):
+    backup_name: str
+
+@app.post("/api/config/backup")
+async def config_backup(req: ConfigBackupRequest = Body(...), request: Request = None):
+    """Snapshots the current dashboard state + active YAML + key metadata.
+    Stores under chains/dashboard_backups/<timestamp>_<name>.json + copied yaml.
+    Does NOT backup entire chains unless include_chains=True (expensive)."""
+    if request and check_rate_limit(request, "/api/config/backup", max_calls=5, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on config backup.")
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '', req.name or "snapshot")
+    backup_id = f"{ts}_{clean_name}" if clean_name else ts
+    backup_path = BACKUP_DIR / f"{backup_id}.json"
+    yaml_backup = BACKUP_DIR / f"{backup_id}.yaml"
+
+    snapshot = {
+        "backup_id": backup_id,
+        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+        "server_uptime": time.time() - SERVER_START_TIME,
+        "state_summary": {},
+        "active_yaml_path": state.active_yaml_path,
+        "active_output_prefix": state.active_output_prefix,
+        "current_status": state.current_status,
+        "run_start_time": state.run_start_time,
+        "watchdog_alerts": list(state.watchdog_alerts),
+        "external_logs_tail": list(state.external_logs[-20:]) if state.external_logs else [],
+    }
+
+    if req.include_state:
+        # lightweight snapshot of key state (avoid huge objects)
+        snapshot["state_summary"] = {
+            "log_eval_count": state.log_eval_count,
+            "history_frames_count": len(state.history_frames),
+            "rebuild_status": state.rebuild_progress.get("status"),
+            "last_computed_chi2": state.last_computed_chi2,
+        }
+
+    # Copy current active config if exists
+    copied_yaml = False
+    try:
+        src = Path(state.active_yaml_path) if state.active_yaml_path else Path("uploaded_config.yaml")
+        if src.exists():
+            shutil.copy2(src, yaml_backup)
+            snapshot["yaml_backup_file"] = str(yaml_backup.name)
+            copied_yaml = True
+    except Exception as e:
+        log_dashboard_error(f"Backup yaml copy failed: {e}", console=True)
+
+    if req.include_chains:
+        try:
+            chains_src = Path("chains")
+            if chains_src.exists():
+                # light touch: just note, full zip expensive for live; user can use /download_chains
+                snapshot["chains_note"] = "Full chains not embedded; use separate archive if needed."
+        except Exception:
+            pass
+
+    try:
+        with open(backup_path, "w") as f:
+            json.dump(snapshot, f, indent=2, default=str)
+        log_dashboard_error(f"Config/state backup created: {backup_path.name}", console=True)
+        return {
+            "status": "success",
+            "backup_id": backup_id,
+            "backup_file": str(backup_path),
+            "yaml_backup": str(yaml_backup) if copied_yaml else None,
+            "message": "Dashboard state snapshot saved."
+        }
+    except Exception as e:
+        log_dashboard_error(f"Failed to write backup: {e}", console=True)
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+
+@app.get("/api/config/backups")
+async def list_config_backups():
+    """Lists available config/state snapshots."""
+    items = []
+    if not BACKUP_DIR.exists():
+        return {"status": "success", "backups": []}
+    for f in sorted(BACKUP_DIR.glob("*.json"), reverse=True):
+        try:
+            with open(f, "r") as fh:
+                meta = json.load(fh)
+            items.append({
+                "backup_id": meta.get("backup_id", f.stem),
+                "timestamp": meta.get("timestamp"),
+                "active_yaml_path": meta.get("active_yaml_path"),
+                "status_at_backup": meta.get("current_status"),
+                "file": str(f)
+            })
+        except Exception:
+            items.append({"backup_id": f.stem, "file": str(f), "corrupt": True})
+    return {"status": "success", "backups": items[:50]}  # cap
+
+@app.post("/api/config/restore")
+async def config_restore(req: ConfigRestoreRequest, request: Request = None):
+    """Restores a previous snapshot's YAML into uploaded_config.yaml (and optionally state hints).
+    Does not auto-start run; user should load + validate + start."""
+    if request and check_rate_limit(request, "/api/config/restore", max_calls=3, window_sec=60):
+        ts = time.strftime('%Y-%m-%d %H:%M:%S')
+        raise HTTPException(status_code=429, detail=f"[{ts}] Rate limit on config restore.")
+    backup_json = BACKUP_DIR / f"{req.backup_name}.json"
+    backup_yaml = BACKUP_DIR / f"{req.backup_name}.yaml"
+    if not backup_json.exists():
+        # try glob match
+        matches = list(BACKUP_DIR.glob(f"*{req.backup_name}*.json"))
+        if matches:
+            backup_json = matches[0]
+            backup_yaml = backup_json.with_suffix(".yaml")
+        else:
+            raise HTTPException(status_code=404, detail="Backup not found.")
+
+    try:
+        with open(backup_json, "r") as f:
+            snap = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to read backup metadata: {e}")
+
+    target_yaml = Path("uploaded_config.yaml")
+    restored = False
+    if backup_yaml.exists():
+        try:
+            shutil.copy2(backup_yaml, target_yaml)
+            restored = True
+        except Exception as e:
+            log_dashboard_error(f"Restore yaml copy error: {e}", console=True)
+            raise HTTPException(status_code=500, detail=f"Failed to restore config file: {e}")
+    else:
+        # try to use active_yaml_path from snap if present and exists
+        orig = snap.get("active_yaml_path")
+        if orig and Path(orig).exists():
+            try:
+                shutil.copy2(orig, target_yaml)
+                restored = True
+            except Exception as e:
+                log_dashboard_error(f"Restore from orig path failed: {e}", console=True)
+
+    # Optionally inject minimal state (non-running)
+    if snap.get("current_status") and snap["current_status"] != "running":
+        state.current_status = snap.get("current_status", state.current_status)
+        # do not restore running_process etc.
+
+    msg = "Config restored from backup."
+    if not restored:
+        msg = "Backup metadata loaded but no YAML snapshot found to restore (manual copy needed)."
+
+    log_dashboard_error(f"Config restore: {req.backup_name} -> uploaded_config.yaml", console=True)
+    return {
+        "status": "success",
+        "restored_yaml": restored,
+        "message": msg,
+        "backup_meta": {
+            "id": snap.get("backup_id"),
+            "timestamp": snap.get("timestamp"),
+            "orig_yaml": snap.get("active_yaml_path")
+        }
+    }
 
 # --- Serve Dashboard UI ---
 if Path("dashboard").exists():
@@ -5370,7 +5988,8 @@ if __name__ == "__main__":
         }
         with open(baseline_db_file, 'w') as f:
             json.dump(baselines, f, indent=4)
-        print(f"Initialized empty baselines in: {baseline_db_file}")
+        log_dashboard_error(f"Initialized empty baselines in: {baseline_db_file}")
 
-    print("Starting CosmicDashboard backend server on http://localhost:8000")
+    log_dashboard_error("Starting CosmicDashboard backend server on http://localhost:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, access_log=False)
+

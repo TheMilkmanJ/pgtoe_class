@@ -19,6 +19,7 @@ theory:
     extra_args:
       N_ur: 3.044
       N_ncdm: 0
+      non_linear: halofit
 
 # 3. Parameter Dictionary (Only 2 parameters varied so it finishes instantly)
 params:

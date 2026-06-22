@@ -18,18 +18,50 @@ TUNNEL_LOG="$SCRIPT_DIR/chains/dashboard_tunnel.log"
 PORT=8000
 RESTART_DELAY=5   # seconds to wait before restarting a crashed service
 
-# Activate the pgtoe_gold conda environment if available
-CONDA_INIT="$HOME/miniconda3/etc/profile.d/conda.sh"
-if [ -f "$CONDA_INIT" ]; then
-    # shellcheck source=/dev/null
-    source "$CONDA_INIT"
-    conda activate pgtoe_gold 2>/dev/null || true
+# Set Python path to pgtoe_gold conda environment directly to avoid shell function activation crashes
+if [ -f "/home/themilkmanj/miniconda3/envs/pgtoe_gold/bin/python3" ]; then
+    PYTHON="/home/themilkmanj/miniconda3/envs/pgtoe_gold/bin/python3"
+else
+    PYTHON=$(command -v python3 || command -v python)
 fi
-
-PYTHON=$(command -v python3 || command -v python)
 NPX=$(command -v npx || true)
 
 mkdir -p "$SCRIPT_DIR/chains"
+
+# ---------------------------------------------------------------------------
+# Dashboard HTTP Basic Auth credentials (prevents repeated login prompts)
+# ---------------------------------------------------------------------------
+# If the user has not exported DASHBOARD_PASS, generate ONE stable password
+# for the lifetime of this launcher session and export it. The backend child
+# process (and any watcher restarts) will inherit it and skip its own random
+# generation. The same value is used by the health-check curls below.
+if [ -z "${DASHBOARD_PASS:-}" ]; then
+    DASHBOARD_PASS=$(python3 -c "
+import secrets, string
+# Use a shorter, user-friendly random password (alphanum + safe symbols)
+alphabet = string.ascii_letters + string.digits + '-_'
+print(''.join(secrets.choice(alphabet) for _ in range(12)))
+")
+    echo "==========================================================================="
+    echo " COSMICDASHBOARD LOGIN CREDENTIALS (stable for this launcher run)"
+    echo ""
+    echo "   Username : ${DASHBOARD_USER:-admin}"
+    echo "   Password : $DASHBOARD_PASS"
+    echo ""
+    echo "   (Enter these when your browser prompts for login.)"
+    echo "   To use your own fixed password every time, run before the launcher:"
+    echo "     export DASHBOARD_USER=yourname"
+    echo "     export DASHBOARD_PASS=your-memorable-password"
+    echo ""
+    echo "   Credentials also written to chains/dashboard_credentials.txt"
+    echo "==========================================================================="
+    echo "$DASHBOARD_PASS" > "$SCRIPT_DIR/chains/dashboard_credentials.txt"
+    chmod 600 "$SCRIPT_DIR/chains/dashboard_credentials.txt" 2>/dev/null || true
+fi
+
+export DASHBOARD_USER="${DASHBOARD_USER:-admin}"
+export DASHBOARD_PASS
+export DASHBOARD_WORKSPACE_ROOT="${DASHBOARD_WORKSPACE_ROOT:-$(pwd)}"
 
 # ---------------------------------------------------------------------------
 # Cleanup: kill background workers on exit

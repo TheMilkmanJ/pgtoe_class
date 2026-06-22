@@ -20,6 +20,7 @@ theory:
     stop_at_error: False
     extra_args:
       use_prtoe: 'no'
+      non_linear: halofit
 
 params:
   omega_b:

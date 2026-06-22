@@ -796,6 +796,10 @@ async function updateBaseline(dataset, evidence, chi2) {
 async function checkStatus() {
     try {
         const response = await fetch(`${API_URL}/api/status`);
+        if (response.status === 401) {
+            showLoginModal(() => checkStatus());  // retry after login
+            return;
+        }
         if (!response.ok) return;
         const data = await response.json();
         lastStatusData = data;
@@ -912,8 +916,8 @@ async function checkStatus() {
         }
 
         // Update speed and ETA
-        if (statSpeed) statSpeed.textContent = data.speed || "-";
-        if (statEta) statEta.textContent = data.eta || "-";
+        if (statSpeed) statSpeed.textContent = (data.speed !== null && data.speed !== undefined) ? data.speed : "-";
+        if (statEta) statEta.textContent = (data.eta !== null && data.eta !== undefined) ? data.eta : "-";
 
         // Update 1-sigma constraints table
         if (data.constraints && data.constraints.length > 0) {
@@ -930,7 +934,7 @@ async function checkStatus() {
 
         // Update tensions and struggles
         // Render Tensions Badge
-        statTensionsBadge.textContent = data.tension_status;
+        statTensionsBadge.textContent = data.tension_status || "Unknown";
         if (data.tension_status === "Both Solved!") {
             statTensionsBadge.style.background = "rgba(57, 255, 20, 0.2)";
             statTensionsBadge.style.color = "#39ff14";
@@ -1057,10 +1061,11 @@ async function checkStatus() {
         
         // Update initialization progress bar
         if (data.status === 'running' || data.status === 'completed') {
-            let p = data.init_percent !== undefined ? data.init_percent : 0;
+            let p = (data.init_percent !== undefined && data.init_percent !== null) ? data.init_percent : 0;
             if (data.status === 'completed') p = 100;
-            initFill.style.width = `${p}%`;
-            initPercent.textContent = `${p}%`;
+            const pRounded = Math.round(p);
+            initFill.style.width = `${pRounded}%`;
+            initPercent.textContent = `${pRounded}%`;
         } else {
             initFill.style.width = '0%';
             initPercent.textContent = '0%';
@@ -1166,6 +1171,32 @@ async function checkStatus() {
             watchdogDesc.style.display = "none";
             watchdogDesc.innerHTML = "";
             document.getElementById('watchdog-actions').style.display = 'none';
+        }
+
+        // Populate H0/S8 tension detail elements
+        if (data.tensions) {
+            const t = data.tensions;
+            const h0TensionEl = document.getElementById('detail-h0-tension');
+            const s8TensionEl = document.getElementById('detail-s8-tension');
+            const valH0Mean = document.getElementById('val-h0-mean');
+            const valH0Std = document.getElementById('val-h0-std');
+            const valS8Mean = document.getElementById('val-s8-mean');
+            const valS8Std = document.getElementById('val-s8-std');
+
+            if (h0TensionEl) {
+                const h0t = t.H0_tension !== null && t.H0_tension !== undefined ? `${t.H0_tension.toFixed(2)}σ` : '-';
+                h0TensionEl.textContent = h0t;
+                h0TensionEl.style.color = (t.H0_tension !== null && t.H0_tension < 2.0) ? '#39ff14' : '#ff007f';
+            }
+            if (s8TensionEl) {
+                const s8t = t.S8_tension_kids !== null && t.S8_tension_kids !== undefined ? `${t.S8_tension_kids.toFixed(2)}σ (KiDS)` : '-';
+                s8TensionEl.textContent = s8t;
+                s8TensionEl.style.color = (t.S8_tension_kids !== null && t.S8_tension_kids < 2.0) ? '#39ff14' : '#ff007f';
+            }
+            if (valH0Mean && t.H0_mean !== null && t.H0_mean !== undefined) valH0Mean.textContent = t.H0_mean.toFixed(2);
+            if (valH0Std && t.H0_std !== null && t.H0_std !== undefined) valH0Std.textContent = t.H0_std.toFixed(2);
+            if (valS8Mean && t.S8_mean !== null && t.S8_mean !== undefined) valS8Mean.textContent = t.S8_mean.toFixed(3);
+            if (valS8Std && t.S8_std !== null && t.S8_std !== undefined) valS8Std.textContent = t.S8_std.toFixed(3);
         }
 
         // Update curves Chart.js
@@ -1565,21 +1596,23 @@ function copyToClipboard(text, buttonId) {
     });
 }
 
-// Register Copy Button Listeners
+// Register Copy Button Listener
 document.addEventListener('DOMContentLoaded', () => {
     // 1. Copy Evidence Comparison Math
     const btnCopyEvidence = document.getElementById('btn-copy-evidence');
     if (btnCopyEvidence) {
         btnCopyEvidence.addEventListener('click', () => {
             if (!lastStatusData) return;
-            const logEvidenceVal = lastStatusData.log_evidence !== null ? `${lastStatusData.log_evidence.toFixed(4)} +/- ${lastStatusData.log_evidence_error.toFixed(4)}` : "-";
+            const logEvidenceVal = (lastStatusData.log_evidence !== null && lastStatusData.log_evidence !== undefined)
+                ? `${lastStatusData.log_evidence.toFixed(4)} +/- ${lastStatusData.log_evidence_error !== null && lastStatusData.log_evidence_error !== undefined ? lastStatusData.log_evidence_error.toFixed(4) : '?'}`
+                : "-";
             const valBaselineText = document.getElementById('val-baseline').textContent;
+            const valCustomTextVal = document.getElementById('val-custom').textContent;
+            const valDeltaTextVal = document.getElementById('val-delta').textContent;
+            const jeffTextVal = document.getElementById('jeffreys-text').textContent;
+            const jeffDescTextVal = document.getElementById('jeffreys-desc').textContent;
             const labelCustomText = document.getElementById('label-custom-model').textContent.replace(/:/g, '').trim();
-            const text = `--- Bayesian Evidence Comparison ---
-Baseline log(Z): ${valBaselineText}
-${labelCustomText}: ${valCustomText} (Evidence Z: ${logEvidenceVal})
-Delta log(Z): ${valDeltaText}
-Evidence Strength: ${jeffText} (${jeffDescText})`;
+            const text = `--- Bayesian Evidence Comparison ---\nBaseline log(Z): ${valBaselineText}\n${labelCustomText}: ${valCustomTextVal} (Evidence Z: ${logEvidenceVal})\nDelta log(Z): ${valDeltaTextVal}\nEvidence Strength: ${jeffTextVal} (${jeffDescTextVal})`;
             copyToClipboard(text, 'btn-copy-evidence');
         });
     }
@@ -4225,3 +4258,74 @@ function playIntergalacticSynth() {
         intergalacticPlaying = false;
     }
 }
+
+// --- Simple in-app Login Modal for "remember me" flow (replaces repeated browser Basic Auth prompts)
+// Called when API returns 401. Posts to /api/login which sets httpOnly cookie.
+let loginModal = null;
+
+function showLoginModal(onSuccess) {
+    if (loginModal) loginModal.remove();
+    loginModal = document.createElement('div');
+    loginModal.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:9999;';
+    loginModal.innerHTML = `
+        <div style="background:#1a1a2e;color:#fff;padding:30px;border-radius:12px;max-width:340px;width:90%;box-shadow:0 10px 30px rgba(0,0,0,0.5);font-family:system-ui;">
+            <h3 style="margin-top:0;color:#00d2d3;">CosmicDashboard Login</h3>
+            <p style="font-size:13px;opacity:0.8;">Enter your credentials (same as Basic Auth). Check "Remember me" for longer session.</p>
+            <input id="login-user" type="text" placeholder="Username" value="admin" style="width:100%;padding:8px;margin:6px 0;background:#16213e;color:#fff;border:1px solid #00d2d3;">
+            <input id="login-pass" type="password" placeholder="Password" style="width:100%;padding:8px;margin:6px 0;background:#16213e;color:#fff;border:1px solid #00d2d3;">
+            <label style="display:block;margin:8px 0;font-size:13px;"><input id="login-remember" type="checkbox" checked> Remember me (30 days)</label>
+            <div style="margin-top:12px;">
+                <button id="login-btn" style="background:#00d2d3;color:#000;padding:8px 16px;border:none;border-radius:6px;cursor:pointer;margin-right:8px;">Login</button>
+                <button id="login-cancel" style="background:transparent;color:#ccc;padding:8px 16px;border:1px solid #555;border-radius:6px;cursor:pointer;">Cancel</button>
+            </div>
+            <div id="login-error" style="color:#ff6b6b;margin-top:8px;font-size:12px;display:none;"></div>
+        </div>
+    `;
+    document.body.appendChild(loginModal);
+
+    const userIn = loginModal.querySelector('#login-user');
+    const passIn = loginModal.querySelector('#login-pass');
+    const remIn = loginModal.querySelector('#login-remember');
+    const errEl = loginModal.querySelector('#login-error');
+    const btn = loginModal.querySelector('#login-btn');
+    const cancel = loginModal.querySelector('#login-cancel');
+
+    function doLogin() {
+        const u = userIn.value.trim();
+        const p = passIn.value;
+        const rem = remIn.checked;
+        if (!u || !p) {
+            errEl.textContent = 'Username and password required.';
+            errEl.style.display = 'block';
+            return;
+        }
+        btn.disabled = true;
+        fetch(`${API_URL}/api/login`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({username: u, password: p, remember_me: rem})
+        }).then(r => r.json()).then(data => {
+            if (data.status === 'success') {
+                loginModal.remove();
+                loginModal = null;
+                if (typeof onSuccess === 'function') onSuccess();
+                else location.reload();  // safe refresh to pick up cookie for all calls
+            } else {
+                errEl.textContent = data.detail || 'Login failed.';
+                errEl.style.display = 'block';
+            }
+        }).catch(e => {
+            errEl.textContent = 'Network error: ' + e.message;
+            errEl.style.display = 'block';
+        }).finally(() => btn.disabled = false);
+    }
+
+    btn.onclick = doLogin;
+    passIn.onkeydown = (e) => { if (e.key === 'Enter') doLogin(); };
+    cancel.onclick = () => { loginModal.remove(); loginModal = null; };
+    // focus pass
+    setTimeout(() => passIn.focus(), 100);
+}
+
+// Expose for manual testing from console if needed
+window.showCosmicLogin = showLoginModal;
