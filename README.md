@@ -52,6 +52,24 @@ TAKING APPLICATION FEATURE REQUESTS!!! Please leave a detailed description of wh
 
 **See the [Full Modern Bayesian Model Comparison Suite](#full-modern-bayesian-model-comparison-suite-making-aicbic-obsolete-for-complex-models) and [Visual & UX Upgrades](#visual--ux-upgrades) sections below for everything that has been added or significantly upgraded.**
 
+### Changelog
+
+#### Recent Major Documentation Update (README for GitHub Repo Page)
+
+README fully updated (I first read the entire 240-line file end-to-end via the tools to ensure all sections, cross-references, and existing descriptions were understood and lined up before editing).
+
+Summary of changes made
+• Top-level description (PRTOE + CosmicDashboard intro paragraph): Expanded to highlight the full modern Bayesian suite (PSIS-LOO + Pareto k, Stacking, Savage-Dickey, conditional evolution movies, etc.) that makes AIC/BIC obsolete, plus visuals (alive nebula), reliability fixes, AI prompts, phone/remote, etc.
+• "New in recent releases" call-out (right after the "Working & Usable Control Suite" header): Added a prominent highlighted block listing all the major additions/upgrades (with links to the new detailed sections). This makes the "all the new features" immediately visible.
+• Phone section: Left the existing detailed text mostly intact (it was already accurate from prior work) but added a short cross-reference at the end pointing to the new "Visual & UX Upgrades" section for the latest hardening (file fallbacks, always-visible pill, etc.). This keeps everything lined up without duplication.
+• Advanced Academic & Diagnostic Features list: Kept all the pre-existing bullets (Playground, Live Sampler Health, Run-vs-Run, Per-Point Residuals, Provenance, Notebook Generator, Autopsy Timeline, Auto-Rebuilder) exactly as they were. Appended a clean new block of bullets for the major recent additions/upgrades so the list is now comprehensive and up-to-date.
+• Two brand-new detailed sections (inserted after the legacy Advanced list, before Screenshots):
+  • Full Modern Bayesian Model Comparison Suite (Making AIC/BIC Obsolete for Complex Models): Comprehensive coverage of PSIS-LOO + Pareto k (with integration notes, k>0.7 fragility meaning, per-probe extraction), Bayesian Stacking (M-open vs BMA, weights explanation), Savage-Dickey (exact nested BF, YAML prior loading, PRTOE example), and the upgraded Parameter Evolution History (now only on real posterior shifts via key-means signature, auto-advance in UI, working GIF compiler). Also notes exposure in UI, APIs, bundles, and AI prompts.
+  • Visual & UX Upgrades: Details the "Alive" Nebula Cosmic Portal (always-visible, has-model glass name readability, fully-alive running state with flowing dust/pulse/energy/live glow, pure CSS), the hardened Phone Sync (with explicit pointers back to the phone section), the complete AI Prompt Suite ("Copy All" + specialized buttons, shared builder, new features baked into every prompt with "why this obsoletes AIC/BIC" language), and Production Reliability (wrapper _original_* captures, get_current_best_fit_params() helper + StateManager shim, no more crashes).
+• Screenshots & Demo Videos section: Updated the placeholder text + "Coming soon" list to specifically call out the new visuals (alive nebula states, evolution scrubber + GIF, PSIS/Stacking/Savage buttons + results, always-visible phone pill, Copy ALL AI Prompts flow, new Bayesian cards). Added encouragement for user contributions of exactly these. Minor polish on the "cool integration" note.
+• Cross-references and consistency: All new anchors (#full-modern-bayesian-model-comparison-suite-making-aicbic-obsolete-for-complex-models and #visual--ux-upgrades) are used from the top call-out, the phone section, the screenshots section, etc. Language is consistent with current code (endpoint names, button text, exact behaviors like "only on noticeable posterior change", "k>0.7", "M-open", "flowing space dust", etc.). The classic upstream CLASS documentation (after the custom CosmicDashboard content) was left completely untouched.
+• Overall flow: The README now reads as a single coherent story from quick start → phone/remote → (new) "New in recent releases" teaser → detailed Advanced list (legacy + new) → the two deep new sections (Bayesian suite + Visuals) → screenshots. Everything "lines up" with the actual implemented state (including recent evolution-history conditional logic + GIF path fix, nebula always-on + states, phone file fallback + always-visible pill, AI prompt refactoring, wrapper/helper reliability, etc.).
+
 ### Quick Start (One-Click Launch)
 
 The absolute easiest way to run CosmicDashboard is using Docker. We have included automated launch scripts that will safely compile the C-engine, set up the Python environment, and launch the visual dashboard for you.
