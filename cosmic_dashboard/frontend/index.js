@@ -936,10 +936,10 @@ async function refreshDerivedParameters() {
             if (k === 'computed_at' || k === 'engine' || k === 'error') return;
             const label = nice[k] || k;
             const val = typeof d[k] === 'number' ? d[k].toFixed(5) : d[k];
-            html += `<div><span style="color:#a4b0be">${label}:</span> <span style="color:#fff;font-weight:600">${val}</span></div>`;
+            html += `<div><span style="color:#a4b0be">${escHtml(String(label))}:</span> <span style="color:#fff;font-weight:600">${escHtml(String(val))}</span></div>`;
         });
         if (d.engine) {
-            html += `<div style="grid-column:1/-1; font-size:0.68rem; color:#666; margin-top:4px;">Computed with: ${d.engine}</div>`;
+            html += `<div style="grid-column:1/-1; font-size:0.68rem; color:#666; margin-top:4px;">Computed with: ${escHtml(d.engine)}</div>`;
         }
         body.innerHTML = html || '<div style="color:#a4b0be">No standard deriveds available for this model</div>';
     } catch (e) {
@@ -2324,7 +2324,7 @@ function renderLogs() {
             return esc.replace(/(\[.*?\])/g, '<span style="color:#feca57">$1</span>');
         }).join('<br>') + '<br><br><span style="color:#a4b0be; font-weight:bold;">--- DASHBOARD STATUS LOGS ---</span><br>';
     }
-    html += localLogs.join('<br>');
+    html += localLogs.map(l => escHtml(String(l))).join('<br>');
     consoleBody.innerHTML = html;
     consoleBody.scrollTop = consoleBody.scrollHeight;
 }

@@ -452,13 +452,41 @@ _shutdown_force_timer = None
 def anakin_skywalker_directive():
     """Hunt down and kill orphan processes that are eating CPU resources.
     Themed after Order 66 - Anakin clears the temple of younglings (orphan processes).
+    
+    Now scoped to dashboard-owned processes only to avoid killing unrelated user jobs.
     """
     import subprocess
 
     killed_count = 0
     killed_processes = []
 
-    # Define orphan patterns to hunt
+    # Get dashboard-owned process PIDs to scope cleanup
+    dashboard_pids = set()
+    if state.running_process and state.running_process.poll() is None:
+        dashboard_pids.add(state.running_process.pid)
+        # Add children of running process
+        try:
+            parent = psutil.Process(state.running_process.pid)
+            for child in parent.children(recursive=True):
+                dashboard_pids.add(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    if state.monitor_process and state.monitor_process.poll() is None:
+        dashboard_pids.add(state.monitor_process.pid)
+        # Add children of monitor process
+        try:
+            parent = psutil.Process(state.monitor_process.pid)
+            for child in parent.children(recursive=True):
+                dashboard_pids.add(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    # If no dashboard processes running, nothing to clean
+    if not dashboard_pids:
+        return 0
+
+    # Define orphan patterns to hunt (only within dashboard-owned processes)
     orphan_patterns = [
         'plot_chains.py',
         'mpirun.*defunct',
@@ -491,6 +519,10 @@ def anakin_skywalker_directive():
 
             # Only hunt processes owned by current user
             if user != current_user:
+                continue
+
+            # Only hunt dashboard-owned processes
+            if int(pid) not in dashboard_pids:
                 continue
 
             # Check if it matches orphan patterns
@@ -762,8 +794,20 @@ async def sanitize_paths_middleware(request: Request, call_next):
 @app.middleware("http")
 async def dashboard_auth_middleware(request: Request, call_next):
     path = request.url.path
-    public = ("/api/login", "/api/logout", "/api/health", "/api/uptime", "/api/sysinfo", "/api/metrics", "/api/supported_models", "/api/validate_config", "/api/class_engines", "/api/derived_parameters")
-    if path.startswith("/api/") and not any(path.startswith(p) for p in public):
+    # Use exact (method, path) matching to avoid prefix-matching security issues
+    public = {
+        ("POST", "/api/login"),
+        ("POST", "/api/logout"),
+        ("GET", "/api/health"),
+        ("GET", "/api/uptime"),
+        ("GET", "/api/sysinfo"),
+        ("GET", "/api/metrics"),
+        ("GET", "/api/supported_models"),
+        ("POST", "/api/validate_config"),
+        ("GET", "/api/class_engines"),  # Only GET for listing engines, not POST for select/remove
+        ("GET", "/api/derived_parameters"),
+    }
+    if path.startswith("/api/") and (request.method, path) not in public:
         # Cookie session first (remember me)
         token = request.cookies.get("dashboard_session")
         if token and token in DASHBOARD_SESSIONS:
@@ -1122,6 +1166,11 @@ def _save_json_store(path: Path, data: dict):
 # Load on module import / startup
 DASHBOARD_SESSIONS = _load_json_store(SESSIONS_FILE, {})
 RATE_LIMIT_STORE = _load_json_store(RATE_LIMITS_FILE, {})
+# Normalize persisted rate-limit entries back to deques (JSON stores as lists)
+RATE_LIMIT_STORE = {
+    k: collections.deque(v)
+    for k, v in RATE_LIMIT_STORE.items()
+}
 
 # Clean expired sessions
 now = time.time()
@@ -3065,12 +3114,27 @@ async def supported_models():
     }
 
 @app.websocket("/ws/status")
-async def websocket_status(websocket: WebSocket):
+async def websocket_status(websocket: WebSocket, token: str = None):
     """WebSocket for real-time status updates (production UX: reduces polling, live feel for long runs)."""
+    # Authenticate via dashboard_session cookie or token query param
+    session_token = token or websocket.query_params.get("token")
+    cookie_token = websocket.cookies.get("dashboard_session")
+    auth_token = session_token or cookie_token
+    
+    if not auth_token or auth_token not in DASHBOARD_SESSIONS:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+    
+    # Check session expiration
+    sess = DASHBOARD_SESSIONS[auth_token]
+    if time.time() >= sess.get("exp", 0):
+        DASHBOARD_SESSIONS.pop(auth_token, None)
+        await websocket.close(code=1008, reason="Session expired")
+        return
+    
     await manager.connect(websocket)
     try:
         # Send initial status
-        # Note: auth is via middleware/cookie for WS in production; for simplicity here we assume prior auth or add token param
         initial_status = await get_status()  # reuse but careful with async
         await websocket.send_json({"type": "status", "data": initial_status})
         while True:
@@ -4762,6 +4826,55 @@ async def compute_custom_derived(req: dict = Body(...)):
     """Support user-typed expressions for derived quantities and full posterior marginals if chain available.
     expressions: list of strings like "H0 - 73.04", "S8 - 0.776", "100*(H0-67.4)/67.4"
     """
+    import ast
+    import operator
+    
+    # Safe operators mapping
+    safe_operators = {
+        ast.Add: operator.add,
+        ast.Sub: operator.sub,
+        ast.Mult: operator.mul,
+        ast.Div: operator.truediv,
+        ast.Pow: operator.pow,
+        ast.USub: operator.neg,
+        ast.UAdd: operator.pos,
+    }
+    
+    def safe_eval(expr, safe_dict):
+        """Safely evaluate arithmetic expressions using AST parsing."""
+        node = ast.parse(expr, mode='eval')
+        
+        def _eval(node):
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float)):
+                    return node.value
+                else:
+                    raise ValueError(f"Constant {node.value} not allowed")
+            elif isinstance(node, ast.Name):
+                if node.id in safe_dict:
+                    return safe_dict[node.id]
+                else:
+                    raise ValueError(f"Name '{node.id}' not in safe context")
+            elif isinstance(node, ast.BinOp):
+                left = _eval(node.left)
+                right = _eval(node.right)
+                op_type = type(node.op)
+                if op_type in safe_operators:
+                    return safe_operators[op_type](left, right)
+                else:
+                    raise ValueError(f"Operator {op_type.__name__} not allowed")
+            elif isinstance(node, ast.UnaryOp):
+                operand = _eval(node.operand)
+                op_type = type(node.op)
+                if op_type in safe_operators:
+                    return safe_operators[op_type](operand)
+                else:
+                    raise ValueError(f"Unary operator {op_type.__name__} not allowed")
+            else:
+                raise ValueError(f"Expression type {type(node).__name__} not allowed")
+        
+        return _eval(node.body)
+    
     expressions = req.get("expressions", [])
     engine = get_active_class_engine()
     best_params = get_current_best_fit_params()
@@ -4771,7 +4884,7 @@ async def compute_custom_derived(req: dict = Body(...)):
     safe_dict.update({k: v for k, v in best_params.items() if isinstance(v, (int, float))})
     for expr in expressions:
         try:
-            val = eval(expr, {"__builtins__": {}}, safe_dict)
+            val = safe_eval(expr, safe_dict)
             results[expr] = float(val)
         except Exception as e:
             results[expr] = f"error: {str(e)}"
@@ -8707,18 +8820,40 @@ async def set_tunnel_url(req: TunnelUrlRequest):
 # The frontend can call this from a modal when it gets 401 on API calls.
 # Basic Auth still works in parallel for curl/API users.
 @app.post("/api/login")
-async def api_login(req: LoginRequest, response: FastAPIResponse):
+async def api_login(req: LoginRequest, response: FastAPIResponse, request: Request):
     """Login with username/password. On success sets 'dashboard_session' cookie."""
     req_user = os.environ.get("DASHBOARD_USER", "admin")
     req_pass = os.environ.get("DASHBOARD_PASS", "")
     if not req_pass:
         raise HTTPException(status_code=500, detail="Server auth misconfigured (no DASHBOARD_PASS).")
+    
+    # Apply failed login rate limiting
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    if client_ip in FAILED_LOGIN_ATTEMPTS:
+        count, lock_until = FAILED_LOGIN_ATTEMPTS[client_ip]
+        if lock_until > now:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed login attempts. Please try again later.",
+            )
+    
     if not (secrets.compare_digest(req.username, req_user) and secrets.compare_digest(req.password, req_pass)):
-        # Apply the existing failed login rate limit logic for basic-like attempts
-        # (reuse some state from authenticate if possible; simplified here)
-        client_ip = "login"  # could enhance with request.client
-        # For brevity, just reject
+        # Increment failed attempts
+        count, lock_until = FAILED_LOGIN_ATTEMPTS.get(client_ip, (0, 0.0))
+        count += 1
+        if count >= 5:
+            lock_until = now + 300  # 5 minute lockout after 5 failures
+        else:
+            lock_until = now + 30  # 30 second incremental delay
+        FAILED_LOGIN_ATTEMPTS[client_ip] = (count, lock_until)
+        _save_json_store(Path("chains/dashboard_failed_logins.json"), FAILED_LOGIN_ATTEMPTS)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid username or password")
+    
+    # Clear failed attempts on successful login
+    FAILED_LOGIN_ATTEMPTS.pop(client_ip, None)
+    _save_json_store(Path("chains/dashboard_failed_logins.json"), FAILED_LOGIN_ATTEMPTS)
 
     token = secrets.token_urlsafe(32)
     duration = 30 * 24 * 3600 if req.remember_me else 8 * 3600  # remember or session
