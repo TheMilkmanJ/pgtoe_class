@@ -2806,31 +2806,57 @@ int background_derivs(
 
   if (pba->use_prtoe == _TRUE_) {
     double a = exp(loga);
-    
-    /* Smooth Scale-Factor Gate: smoothly activate the field's EoM */
+
+    /* =====================================================================
+       PRTOE-DHOST Framework (aligned with prtoe_dhost_framework.tex)
+       ---------------------------------------------------------------------
+       Action:
+         S = ∫ d⁴x √-g [ (1/(2κ₀))(1 + ξ φ) R
+                         - ½(∇φ)²
+                         - V₀ e^{-λφ}
+                         - ½ m² φ²
+                         + ℒ_Q + ℒ_m ]
+
+       DHOST-Compliant Interaction terms (screened):
+         α², β², δ → α²/(1+φ²), β²/(1+φ²), δ/(1+φ²)
+
+       Scalar EOM (background reduction):
+         The leading curvature coupling gives + (ξ/2) R.
+         Full DHOST operators (R_{μν}∇^μ∇^νφ and matter terms from ℒ_Q)
+         mostly vanish or reduce in homogeneous FLRW background.
+         They are intended primarily for perturbation level.
+       ===================================================================== */
+
+    /* Smooth activation gate (turns on around a ~ 10^{-4}) */
     double activation = 0.5 * (1.0 + tanh(loga + 9.21034037198));
-    
+
     double a2 = a * a;
     double phi = y[pba->index_bi_phi_prtoe];
     double dphi = y[pba->index_bi_dphi_prtoe];
-    
-    /* --- Unified screening function: 1/(1+phi^2) --- */
-    double screening_factor = 1.0 / (1.0 + pba->zeta_prtoe * phi * phi);
-    double xi_screened    = pba->xi_prtoe    * screening_factor * activation;
-    
-    /* --- Potential: V = V0*exp(-lambda*phi) + (1/2)*m^2*phi^2 --- */
-    double m2 = pba->m_prtoe * pba->m_prtoe;
-    double dV_dphi  = -pba->lambda_prtoe * pba->V0_prtoe * exp(-pba->lambda_prtoe * phi) + m2 * phi;
-    
 
-    /* --- Ricci Scalar R --- */
-    pba->R_curvature = 6.0 * (pvecback[pba->index_bg_H_prime] + 2.0 * a * H * H + pba->K / a) / a;
-    double H_conf = H * a;
-    
-    /* --- Equations of motion derivatives --- */
+    /* Screening factor (applied to the triplet) */
+    double screening_factor = 1.0 / (1.0 + pba->zeta_prtoe * phi * phi);
+
+    /* Currently only the ξ R term is active at background level.
+       alpha_prtoe / beta_prtoe / delta_prteo are screened but their
+       full DHOST contributions are not yet reduced here. */
+    double xi_screened = pba->xi_prtoe * screening_factor * activation;
+
+    /* Potential derivative */
+    double m2 = pba->m_prtoe * pba->m_prtoe;
+    double dV_dphi = -pba->lambda_prtoe * pba->V0_prtoe * exp(-pba->lambda_prtoe * phi) + m2 * phi;
+
+    /* Ricci scalar — correct CLASS conformal convention */
+    pba->R_curvature = 6.0 / (a * a) *
+        (pvecback[pba->index_bg_H_prime] + H * H + pba->K);
+
+    /* Klein-Gordon equation in conformal time (background)
+       Friction uses conformal Hubble H (=\mathcal{H}).
+       Source term comes from varying (1 + ξ φ) R → + (ξ/2) R.
+       No extra φ multiplier because the coupling is linear in φ. */
     dy[pba->index_bi_phi_prtoe]  = (dphi / a / MAX(H, 1e-20)) * activation;
     dy[pba->index_bi_dphi_prtoe] = (
-      - 2.0 * H_conf * dphi
+      - 2.0 * H * dphi
       - a2 * dV_dphi
       + (xi_screened / 2.0) * pba->R_curvature * a2
     ) / a / MAX(H, 1e-20) * activation;

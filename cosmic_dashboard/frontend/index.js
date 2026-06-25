@@ -4,6 +4,8 @@ let activeConfig = 'lcdm_config.yaml';
 let lastStatusData = null;
 let baselineBestChi2 = null;
 let baselineLogEvidence = null;
+let lastBaselineUpdateRun = null;
+let isUploadingConfig = false;
 
 // Global chart instances
 let chartWMu = null;
@@ -317,6 +319,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const pasted = prompt('Paste a working phone tunnel URL (e.g. https://abc123.loca.lt) or leave empty to cancel.\n\nUse this for manual "npx localtunnel --port 8000" or if the auto link broke.', current || '');
             if (pasted === null) return; // cancel
             const urlVal = pasted.trim();
+            // Validate URL is HTTP(S) before storing
+            if (urlVal && !urlVal.match(/^https?:\/\//i)) {
+                alert('Invalid URL: must start with http:// or https://');
+                return;
+            }
             try {
                 const resp = await fetch(`${API_URL}/api/set_tunnel_url`, {
                     method: 'POST',
@@ -367,6 +374,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const pasted = prompt('Paste a working phone tunnel URL (e.g. https://abc123.loca.lt) — this activates the Phone Sync link for remote/phone access.\n\nUseful if the launcher phone link "broke", tunnel expired, or you ran npx localtunnel manually in another terminal.', current || '');
             if (pasted === null) return;
             const urlVal = pasted.trim();
+            // Validate URL is HTTP(S) before storing
+            if (urlVal && !urlVal.match(/^https?:\/\//i)) {
+                alert('Invalid URL: must start with http:// or https://');
+                return;
+            }
             try {
                 const resp = await fetch(`${API_URL}/api/set_tunnel_url`, {
                     method: 'POST',
@@ -1173,6 +1185,13 @@ function setupUploadZone(zone, input, handler) {
         input.value = ''; // Reset value to force 'change' event even for the same file
         input.click();
     });
+    zone.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            input.value = '';
+            input.click();
+        }
+    });
     zone.addEventListener('dragover', (e) => {
         e.preventDefault();
         zone.classList.add('active');
@@ -1195,6 +1214,7 @@ function setupUploadZone(zone, input, handler) {
 
 // YAML Configuration upload
 async function handleYamlUpload(file) {
+    isUploadingConfig = true;
     // Optimistically set the active config and UI immediately on selection.
     // Upload will copy content to uploaded_config.yaml on server.
     // This prevents starting with stale activeConfig (e.g. default lcdm) if user starts run
@@ -1235,6 +1255,7 @@ async function handleYamlUpload(file) {
         appendLog(`Upload error: ${err.message}`);
         switchToLcdm();
     } finally {
+        isUploadingConfig = false;
         // Re-enable buttons (status check will manage based on run state)
         if (btnStart) btnStart.disabled = false;
         if (btnResume) btnResume.disabled = false;
@@ -1416,7 +1437,7 @@ async function updateBaseline(dataset, evidence, chi2, evidenceIsFinal, evidence
 // Check current status
 async function checkStatus() {
     try {
-        const response = await fetch(`${API_URL}/api/status`);
+        const response = await fetch(`${API_URL}/api/status`, { credentials: 'include' });
         if (response.status === 401) {
             showLoginModal(() => checkStatus());  // retry after login
             return;
@@ -1434,7 +1455,7 @@ async function checkStatus() {
         const phoneLinkContainer = document.getElementById('phone-link-container');
         const phoneLinkHref = document.getElementById('phone-link-href');
         if (phoneLinkContainer && phoneLinkHref) {
-            if (data.localtunnel_url) {
+            if (data.localtunnel_url && data.localtunnel_url.match(/^https?:\/\//i)) {
                 phoneLinkContainer.style.display = 'flex';
                 phoneLinkHref.href = data.localtunnel_url;
                 phoneLinkHref.textContent = data.localtunnel_url.replace(/^https?:\/\//, '');
@@ -1600,7 +1621,7 @@ async function checkStatus() {
             for (const [key, val] of Object.entries(data.best_raw_params)) {
                 if (!key.startsWith('chi2__') && !key.startsWith('minuslogprior')) {
                     let formattedVal = (typeof val === 'number') ? val.toPrecision(4) : val;
-                    rawHtml += `<div><span style="color:#00d2d3">${key}</span>: ${formattedVal}</div>`;
+                    rawHtml += `<div><span style="color:#00d2d3">${escHtml(key)}</span>: ${escHtml(String(formattedVal))}</div>`;
                 }
             }
             rawHtml += '</div>';
@@ -1621,7 +1642,7 @@ async function checkStatus() {
             constraintsCard.style.display = 'block';
             let constraintsHtml = '<div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 4px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 5px;">';
             data.constraints.forEach(c => {
-                constraintsHtml += `<div><span style="color:#00d2d3">${c.parameter}</span></div><div>${c.mean} &plusmn; ${c.error}</div>`;
+                constraintsHtml += `<div><span style="color:#00d2d3">${escHtml(c.parameter)}</span></div><div>${escHtml(String(c.mean))} &plusmn; ${escHtml(String(c.error))}</div>`;
             });
             constraintsHtml += '</div>';
             constraintsBody.innerHTML = constraintsHtml;
@@ -1822,9 +1843,11 @@ async function checkStatus() {
             let chi2Text = data.best_chi2 !== null ? data.best_chi2.toFixed(4) : 'evaluating';
             let logZText = data.log_evidence !== null ? data.log_evidence.toFixed(4) : 'evaluating';
         } else {
-            btnStart.disabled = false;
-            btnResume.disabled = false;
-            btnStop.disabled = true;
+            if (!isUploadingConfig) {
+                btnStart.disabled = false;
+                btnResume.disabled = false;
+                btnStop.disabled = true;
+            }
         }
 
         // Manage persisted watchdog ignore state
@@ -1868,9 +1891,9 @@ async function checkStatus() {
                         currentProposedUpdates[alert.parameter] = {min: alert.new_min, max: alert.new_max};
                     }
                     return `<div style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.1);">
-                        <strong style="color: #ff9ff3; font-size: 1.1rem;">${alert.parameter}</strong><br>
-                        <span style="color: #feca57;">${alert.status}</span><br>
-                        <span style="color: #a4b0be; font-size: 0.85rem;">Suggestion: <span style="color: #fff;">${alert.suggestion}</span></span>
+                        <strong style="color: #ff9ff3; font-size: 1.1rem;">${escHtml(alert.parameter)}</strong><br>
+                        <span style="color: #feca57;">${escHtml(alert.status)}</span><br>
+                        <span style="color: #a4b0be; font-size: 0.85rem;">Suggestion: <span style="color: #fff;">${escHtml(alert.suggestion)}</span></span>
                     </div>`;
                 }).join("");
 
@@ -2038,7 +2061,11 @@ async function checkStatus() {
                               yamlNameLower.includes('lcdm') ||
                               yamlNameLower.includes('baseline');
             if (isLcdmRun) {
-                updateBaseline("planck_bao_pantheonplus_shoes", data.log_evidence, data.best_chi2, data.evidence_is_final, data.evidence_source);
+                const currentRunId = data.active_output_prefix || data.active_yaml_path;
+                if (lastBaselineUpdateRun !== currentRunId) {
+                    updateBaseline("planck_bao_pantheonplus_shoes", data.log_evidence, data.best_chi2, data.evidence_is_final, data.evidence_source);
+                    lastBaselineUpdateRun = currentRunId;
+                }
                 if (data.evidence_is_final && checkAutoRunCustom && checkAutoRunCustom.checked && !isAutoRunning) {
                     isAutoRunning = true;
                     appendLog(`[PIPELINE] Baseline ΛCDM completed. Preparing to auto-run custom model in 5 seconds...`);
@@ -2922,7 +2949,7 @@ Interpret the BF10. If >>1, the data require the extra PRTOE parameters. Contras
             const jeff = document.getElementById('jeffreys-text') ? document.getElementById('jeffreys-text').textContent : "-";
             const delta = document.getElementById('val-delta') ? document.getElementById('val-delta').textContent : "-";
 
-            const diagnosticPrompt = typeof buildMainDiagnosticPrompt === 'function' ? buildMainDiagnosticPrompt() : `You are a theoretical cosmologist analyzing a CLASS/Cobaya/PolyChord run.
+            const diagnosticPrompt = `You are a theoretical cosmologist analyzing a CLASS/Cobaya/PolyChord run.
 
 Run status: ${status}
 Active config: ${lastStatusData.active_yaml_path || 'unknown'}
@@ -3534,7 +3561,7 @@ async function refreshCompare() {
             const logzStr = m.logz !== null ? `${m.logz.toFixed(2)} +/- ${m.logz_err.toFixed(2)}` : "-";
             const h0Str = m.h0_tension !== null ? `${m.h0_tension.toFixed(2)}σ (${m.h0_val.toFixed(2)})` : (m.h0_val !== null ? m.h0_val.toFixed(2) : "-");
             const s8Str = m.s8_tension !== null ? `${m.s8_tension.toFixed(2)}σ (${m.s8_val.toFixed(3)})` : (m.s8_val !== null ? m.s8_val.toFixed(3) : "-");
-            const wParams = `${m.w0.toFixed(2)}, ${m.wa.toFixed(2)}`;
+            const wParams = m.w0 !== null && m.wa !== null ? `${m.w0.toFixed(2)}, ${m.wa.toFixed(2)}` : "-";
             
             const tr = document.createElement('tr');
             tr.style.borderBottom = "1px solid rgba(255,255,255,0.05)";
@@ -4307,6 +4334,7 @@ async function refreshTemplatesList() {
                     "lcdm_baseline": "ΛCDM Baseline",
                     "prtoe_standard": "PRTOE Standard",
                     "wcdm_test": "wCDM Test",
+                    "ede_test": "EDE Test (Model Zoo)",
                     "last_run": "Last Run"
                 };
                 

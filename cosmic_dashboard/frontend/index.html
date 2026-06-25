@@ -106,7 +106,7 @@
                 <div id="phone-link-container" style="display: none; align-items: center; gap: 6px; background: rgba(0, 210, 255, 0.05); border: 1px solid rgba(0, 210, 255, 0.15); padding: 4px 8px; border-radius: 4px; font-size: 0.82rem; font-family: 'Outfit', sans-serif;">
                     <span style="font-size: 1rem;">📱</span>
                     <span style="color: #a4b0be;">Phone Sync:</span>
-                    <a id="phone-link-href" href="#" target="_blank" style="color: #00d2d3; text-decoration: none; font-weight: bold; font-family: 'JetBrains Mono', monospace;">Checking...</a>
+                    <a id="phone-link-href" href="#" target="_blank" rel="noopener noreferrer" style="color: #00d2d3; text-decoration: none; font-weight: bold; font-family: 'JetBrains Mono', monospace;">Checking...</a>
                     <button id="btn-phone-copy" title="Copy full phone URL" style="background:none; border:none; color:#a4b0be; cursor:pointer; font-size:0.75rem; padding:0 1px; line-height:1;">📋</button>
                     <button id="btn-phone-refresh" title="Refresh status (update phone link)" style="background:none; border:none; color:#a4b0be; cursor:pointer; font-size:0.75rem; padding:0 1px; line-height:1;">🔄</button>
                     <button id="btn-phone-set" title="Manually paste/set a working tunnel URL (use if auto link broke or for manual npx localtunnel)" style="background:none; border:none; color:#a4b0be; cursor:pointer; font-size:0.75rem; padding:0 1px; line-height:1;">📝</button>
@@ -135,7 +135,7 @@
                 <!-- YAML Upload -->
                 <div class="control-group">
                     <label style="display: flex; justify-content: space-between;">Upload Model Configuration (.yaml) <a href="#" id="btn-reset-yaml" style="color: #00d2d3; text-decoration: none; font-size: 0.8rem;">Use Default ΛCDM</a></label>
-                    <div class="file-upload-zone" id="yaml-upload-zone">
+                    <div class="file-upload-zone" id="yaml-upload-zone" role="button" tabindex="0" aria-label="Upload YAML configuration file">
                         <span class="upload-icon">&#x2191;</span>
                         <p>Drag & drop or <span class="browse">browse</span></p>
                         <span class="file-name-display" id="yaml-name">Default: lcdm_config.yaml</span>
