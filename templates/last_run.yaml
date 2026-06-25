@@ -12,7 +12,6 @@ likelihood:
   sn.pantheonplusshoes: null
 theory:
   classy:
-    path: /home/themilkmanj/prtoe_class
     stop_at_error: false
     extra_args:
       use_prtoe: 'yes'
@@ -21,6 +20,7 @@ theory:
       N_ur: 2.0328
       N_ncdm: 1
       T_ncdm: 0.71611
+    path: /home/themilkmanj/prtoe_class
 params:
   omega_b:
     prior:
