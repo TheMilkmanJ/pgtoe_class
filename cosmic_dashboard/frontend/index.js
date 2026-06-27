@@ -37,6 +37,7 @@ const yamlName = document.getElementById('yaml-name');
 const btnResetYaml = document.getElementById('btn-reset-yaml');
 
 const btnStart = document.getElementById('btn-start');
+const btnStartOpt = document.getElementById('btn-start-opt');
 const btnResume = document.getElementById('btn-resume');
 const btnStop = document.getElementById('btn-stop');
 const btnDownload = document.getElementById('btn-download');
@@ -88,6 +89,8 @@ const plotTimestamp = document.getElementById('plot-timestamp');
 const valBaseline = document.getElementById('val-baseline');
 const valCustom = document.getElementById('val-custom');
 const valDelta = document.getElementById('val-delta');
+const multimodalComparisonCard = document.getElementById('multimodal-comparison-card');
+const multimodalComparisonBody = document.getElementById('multimodal-comparison-body');
 
 const jeffreysCard = document.getElementById('jeffreys-card');
 const jeffreysText = document.getElementById('jeffreys-text');
@@ -108,11 +111,44 @@ let isAutoRunning = false; // Flag to track and prevent duplicate auto-run trigg
 let watchdogIgnored = false; // Flag to temporarily ignore watchdog
 let lastRunStartTime = null; // Track run start time to persist ignore state across refreshes
 let lastWatchdogAlertCount = 0; // Track watchdog alert count for audio alerts
+let autoWatchdogEnabled = true;
+
+function updateToggleUI() {
+    const toggle = document.getElementById('toggle-auto-watchdog');
+    if (!toggle) return;
+    const handle = toggle.querySelector('.toggle-handle');
+    if (!handle) return;
+    if (autoWatchdogEnabled) {
+        toggle.style.background = '#10ac84';
+        handle.style.left = '18px';
+    } else {
+        toggle.style.background = 'rgba(255,255,255,0.15)';
+        handle.style.left = '2px';
+    }
+}
 
 // Initial setup
 document.addEventListener('DOMContentLoaded', () => {
     fetchBaselines();
     checkStatus();
+    updateToggleUI();
+
+    const toggleAutoWatchdog = document.getElementById('toggle-auto-watchdog');
+    if (toggleAutoWatchdog) {
+        toggleAutoWatchdog.addEventListener('click', async () => {
+            autoWatchdogEnabled = !autoWatchdogEnabled;
+            updateToggleUI();
+            try {
+                await fetch(`${API_URL}/api/settings/watchdog`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auto_apply: autoWatchdogEnabled })
+                });
+            } catch (err) {
+                console.error("Error updating watchdog settings:", err);
+            }
+        });
+    }
     // PERFORMANCE FIX: Reduce polling from 3s to 5s to reduce server load and page refresh lag
     // 5 seconds is still very responsive for long-running MCMC chains
     statusInterval = setInterval(checkStatus, 5000);
@@ -906,6 +942,197 @@ async function fetchSysInfo() {
     }
 }
 
+async function fetchMultimodalComparison() {
+    if (!multimodalComparisonCard || !multimodalComparisonBody) return;
+    try {
+        const response = await fetch(`${API_URL}/api/multimodal_comparison`, { credentials: 'include' });
+        if (!response.ok) {
+            multimodalComparisonCard.style.display = 'none';
+            return;
+        }
+        const data = await response.json();
+        if (data.status === 'success' && data.modes && data.modes.length > 0) {
+            multimodalComparisonCard.style.display = 'block';
+            
+            // Build the table html
+            let html = `
+                <table style="width: 100%; border-collapse: collapse; margin-top: 8px; text-align: left; font-size: 0.76rem; border: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.15);">
+                    <thead>
+                        <tr style="border-bottom: 2px solid rgba(255,255,255,0.1); background: rgba(0, 210, 211, 0.1); color: #00d2d3;">
+                            <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Parameter / Metric</th>
+            `;
+            
+            // Mode headers
+            data.modes.forEach(mode => {
+                html += `<th style="padding: 8px 6px; font-weight: bold; text-align: center; border-right: 1px solid rgba(255,255,255,0.05);">${mode.name}</th>`;
+            });
+            html += `</tr></thead><tbody>`;
+            
+            // Row for Total Chi2
+            html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(255, 159, 67, 0.05);">
+                        <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #ff9f43;">Total &chi;&sup2; (Raw)</td>`;
+            data.modes.forEach(mode => {
+                html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: #ff9f43;">${mode.chi2 !== null ? mode.chi2.toFixed(4) : '-'}</td>`;
+            });
+            html += `</tr>`;
+
+            // Row for Viability
+            let hasViability = data.modes.some(mode => mode.viability_score !== undefined);
+            if (hasViability) {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(16, 172, 132, 0.05);">
+                            <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #10ac84;">Physical Viability</td>`;
+                data.modes.forEach(mode => {
+                    const score = mode.viability_score;
+                    let color = "#10ac84";
+                    if (score && parseFloat(score) < 95.0) color = "#ee5253";
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: ${color};">${score ? score : '-'}</td>`;
+                });
+                html += `</tr>`;
+            }
+
+            // Row for Penalized Chi2
+            let hasPenalized = data.modes.some(mode => mode.penalized_chi2 !== undefined);
+            if (hasPenalized) {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(95, 39, 205, 0.05);">
+                            <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #5f27cd;">Penalized &chi;&sup2;</td>`;
+                data.modes.forEach(mode => {
+                    const pen = mode.penalized_chi2;
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: #5f27cd;">${pen !== undefined && pen !== null ? pen.toFixed(4) : '-'}</td>`;
+                });
+                html += `</tr>`;
+            }
+            
+            // Rows for parameters
+            const allParams = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.params).forEach(k => allParams.add(k));
+            });
+            const sortedParams = Array.from(allParams).sort();
+            
+            sortedParams.forEach(param => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #a4b0be;">${param}</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.params[param];
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-family: var(--font-mono);">${val || '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            // Rows for Derived Metrics
+            const allMetrics = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.metrics).forEach(k => allMetrics.add(k));
+            });
+            const sortedMetrics = Array.from(allMetrics).sort();
+            
+            sortedMetrics.forEach(metric => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(0, 210, 211, 0.02);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #00d2d3; font-weight: bold;">${metric}</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.metrics[metric];
+                    let cellStyle = "";
+                    if (val && val.includes("PHYSICALLY VIABLE")) {
+                        cellStyle = "color: #10ac84; font-weight: bold;";
+                    } else if (val && val.includes("UNPHYSICAL")) {
+                        cellStyle = "color: #ee5a24; font-weight: bold;";
+                    }
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); ${cellStyle}">${val || '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            // Rows for Likelihoods
+            const allLikes = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.likes).forEach(k => allLikes.add(k));
+            });
+            const sortedLikes = Array.from(allLikes).sort();
+            
+            sortedLikes.forEach(like => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #84817a; font-size: 0.72rem;">&chi;&sup2; (${like.replace('chi2__', '')})</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.likes[like];
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-size: 0.72rem; color: #a4b0be;">${val ? parseFloat(val).toFixed(3) : '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            html += `</tbody></table>`;
+            multimodalComparisonBody.innerHTML = html;
+
+            // Render Tension Analysis if present
+            const tensionCard = document.getElementById('tension-analysis-card');
+            const tensionBody = document.getElementById('tension-analysis-body');
+            if (tensionCard && tensionBody) {
+                if (data.tensions && data.tensions.length > 0) {
+                    tensionCard.style.display = 'block';
+                    let tHtml = `
+                        <table style="width: 100%; border-collapse: collapse; margin-top: 8px; text-align: left; font-size: 0.76rem; border: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.15);">
+                            <thead>
+                                <tr style="border-bottom: 2px solid rgba(255,255,255,0.1); background: rgba(238, 82, 83, 0.1); color: #ee5253;">
+                                    <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Modes Compared</th>
+                                    <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Parameter</th>
+                                    <th style="padding: 8px 6px; font-weight: bold; text-align: center;">Tension (&sigma;)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    data.tensions.forEach(t => {
+                        let badgeColor = "#10ac84";
+                        if (t.value >= 3.0) badgeColor = "#ee5253";
+                        else if (t.value >= 2.0) badgeColor = "#ff9f43";
+                        
+                        tHtml += `
+                            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #a4b0be;">${t.mode1} vs ${t.mode2}</td>
+                                <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #00d2d3; font-weight: bold;">${t.param}</td>
+                                <td style="padding: 6px; text-align: center; font-weight: bold; color: ${badgeColor};">${t.value.toFixed(2)} &sigma;</td>
+                            </tr>
+                        `;
+                    });
+                    tHtml += `</tbody></table>`;
+                    tensionBody.innerHTML = tHtml;
+                } else {
+                    tensionCard.style.display = 'none';
+                }
+            }
+
+            // Render Profile Likelihood Scan if present
+            const profileCard = document.getElementById('profile-likelihood-card');
+            const profilePlot = document.getElementById('profile-likelihood-plot');
+            if (profileCard && profilePlot) {
+                const imgUrl = `${API_URL}/profile_likelihood.png?` + new Date().getTime();
+                const img = new Image();
+                img.onload = function() {
+                    profilePlot.src = imgUrl;
+                    profilePlot.style.display = 'block';
+                    profileCard.style.display = 'block';
+                };
+                img.onerror = function() {
+                    profileCard.style.display = 'none';
+                };
+                img.src = imgUrl;
+            }
+        } else {
+            multimodalComparisonCard.style.display = 'none';
+            const tensionCard = document.getElementById('tension-analysis-card');
+            if (tensionCard) tensionCard.style.display = 'none';
+            const profileCard = document.getElementById('profile-likelihood-card');
+            if (profileCard) profileCard.style.display = 'none';
+        }
+    } catch (err) {
+        console.error("Error fetching multimodal comparison:", err);
+        multimodalComparisonCard.style.display = 'none';
+        const tensionCard = document.getElementById('tension-analysis-card');
+        if (tensionCard) tensionCard.style.display = 'none';
+        const profileCard = document.getElementById('profile-likelihood-card');
+        if (profileCard) profileCard.style.display = 'none';
+    }
+}
+
+
 async function refreshDerivedParameters() {
     const body = document.getElementById('derived-params-body');
     if (!body) return;
@@ -1257,6 +1484,7 @@ async function handleYamlUpload(file) {
     
     // Temporarily disable start/resume during upload to avoid race with activeConfig.
     if (btnStart) btnStart.disabled = true;
+    if (btnStartOpt) btnStartOpt.disabled = true;
     if (btnResume) btnResume.disabled = true;
     
     const formData = new FormData();
@@ -1284,6 +1512,7 @@ async function handleYamlUpload(file) {
         isUploadingConfig = false;
         // Re-enable buttons (status check will manage based on run state)
         if (btnStart) btnStart.disabled = false;
+        if (btnStartOpt) btnStartOpt.disabled = false;
         if (btnResume) btnResume.disabled = false;
     }
 }
@@ -1298,11 +1527,45 @@ btnStart.addEventListener('click', () => {
         () => triggerRun(true)
     );
 });
+if (btnStartOpt) {
+    btnStartOpt.addEventListener('click', () => {
+        showConfirmationModal(
+            "Start Optimized Run",
+            "Are you sure you want to start a fast cosmological optimization run using BOBYQA? This will terminate any active run and launch the new optimizer.",
+            "Yes, Start Optimization",
+            "Cancel",
+            () => triggerRun(true, true)
+        );
+    });
+}
+const btnStartProfile = document.getElementById('btn-start-profile');
+if (btnStartProfile) {
+    btnStartProfile.addEventListener('click', () => {
+        const param = document.getElementById('profile-param').value;
+        const minVal = parseFloat(document.getElementById('profile-min').value);
+        const maxVal = parseFloat(document.getElementById('profile-max').value);
+        const steps = parseInt(document.getElementById('profile-steps').value) || 8;
+        
+        let range = null;
+        if (!isNaN(minVal) && !isNaN(maxVal)) {
+            range = [minVal, maxVal];
+        }
+        
+        showConfirmationModal(
+            "Start Profile Likelihood Scan",
+            `Are you sure you want to start a Profile Likelihood Scan for parameter ${param}? This will fix ${param} at ${steps} points and optimize all other parameters at each step.`,
+            "Yes, Start Scan",
+            "Cancel",
+            () => triggerRun(true, true, param, range, steps)
+        );
+    });
+}
 btnResume.addEventListener('click', () => triggerRun(false));
 
-async function triggerRun(forceOverwrite) {
+async function triggerRun(forceOverwrite, isOptimizer = false, profileParam = null, profileRange = null, profileSteps = 8) {
     isAutoRunning = false;
     btnStart.disabled = true;
+    if (btnStartOpt) btnStartOpt.disabled = true;
     btnResume.disabled = true;
     const cores = inputCores ? (parseInt(inputCores.value) || 24) : 24;
     
@@ -1319,7 +1582,15 @@ async function triggerRun(forceOverwrite) {
     const configForLog = (yamlName && yamlName.textContent && yamlName.textContent.includes('.')) 
         ? yamlName.textContent 
         : activeConfig;
-    appendLog(`Starting PolyChord nested sampling on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+    if (isOptimizer) {
+        if (profileParam) {
+            appendLog(`Starting Profile Scan for ${profileParam} on ${cores} cores with config: ${configForLog}...`);
+        } else {
+            appendLog(`Starting Cosmo Optimizer on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+        }
+    } else {
+        appendLog(`Starting PolyChord nested sampling on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+    }
     
     try {
         const response = await fetch(`${API_URL}/api/start_run`, {
@@ -1329,7 +1600,14 @@ async function triggerRun(forceOverwrite) {
                 config_name: activeConfig,
                 cores: cores,
                 auto_rebuild: autoRebuild,
-                force_overwrite: forceOverwrite
+                force_overwrite: forceOverwrite,
+                is_optimizer: isOptimizer,
+                optimizer_method: "bobyqa",
+                optimizer_multistart: isOptimizer && !profileParam ? 4 : 1,
+                optimizer_mcmc_steps: isOptimizer && !profileParam ? 100 : 0,
+                profile_param: profileParam,
+                profile_range: profileRange,
+                profile_steps: profileSteps
             })
         });
         const data = await response.json();
@@ -1341,11 +1619,13 @@ async function triggerRun(forceOverwrite) {
         } else {
             appendLog(`Failed to start: ${data.detail}`);
             btnStart.disabled = false;
+            if (btnStartOpt) btnStartOpt.disabled = false;
             btnResume.disabled = false;
         }
     } catch (err) {
         appendLog(`Execution error: ${err.message}`);
         btnStart.disabled = false;
+        if (btnStartOpt) btnStartOpt.disabled = false;
         btnResume.disabled = false;
     }
 }
@@ -1472,9 +1752,15 @@ async function checkStatus() {
         const data = await response.json();
         lastStatusData = data;
         
+        if (data.auto_apply_watchdog !== undefined && data.auto_apply_watchdog !== autoWatchdogEnabled) {
+            autoWatchdogEnabled = data.auto_apply_watchdog;
+            updateToggleUI();
+        }
+        
         // Refresh drool-worthy derived params when we have new best-fit info
         if (data.best_fit || data.chi2 || data.evidence) {
             refreshDerivedParameters();
+            fetchMultimodalComparison();
         }
         
         // Update Phone Sync link
@@ -1863,6 +2149,7 @@ async function checkStatus() {
         if (data.status === 'running') {
             isAutoRunning = false;
             btnStart.disabled = true;
+            if (btnStartOpt) btnStartOpt.disabled = true;
             btnResume.disabled = true;
             btnStop.disabled = false;
             
@@ -1873,6 +2160,7 @@ async function checkStatus() {
             btnStop.disabled = true;
             if (!isUploadingConfig) {
                 btnStart.disabled = false;
+                if (btnStartOpt) btnStartOpt.disabled = false;
                 btnResume.disabled = false;
             }
         }
@@ -2603,6 +2891,18 @@ ${strugglesText}`;
             // grab visible text
             text += body.innerText || body.textContent;
             copyToClipboard(text, 'btn-copy-derived');
+        });
+    }
+
+    // 4.6 Copy Multimodal Comparison (new)
+    const btnCopyMultimodal = document.getElementById('btn-copy-multimodal');
+    if (btnCopyMultimodal) {
+        btnCopyMultimodal.addEventListener('click', () => {
+            const body = document.getElementById('multimodal-comparison-body');
+            if (!body) return;
+            let text = '--- Multimodal Cosmological Exploration Comparison ---\n';
+            text += body.innerText || body.textContent;
+            copyToClipboard(text, 'btn-copy-multimodal');
         });
     }
 
@@ -4760,7 +5060,7 @@ async function handleCompareRuns() {
 
                     html += `
                         <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <td style="padding: 6px; font-weight: bold; color: #ff9ff3;">${param}</td>
+                            <td style="padding: 6px; font-weight: bold; color: #ff9ff3;">${escHtml(String(param))}</td>
                             <td style="padding: 6px; font-family: var(--font-mono);">${meanA.toFixed(4)} &plusmn; ${errA.toFixed(4)}</td>
                             <td style="padding: 6px; font-family: var(--font-mono);">${meanB.toFixed(4)} &plusmn; ${errB.toFixed(4)}</td>
                             <td style="padding: 6px; font-family: var(--font-mono); color: ${shiftColor};">${shift >= 0 ? '+' : ''}${shift.toFixed(4)}</td>

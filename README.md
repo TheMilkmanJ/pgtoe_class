@@ -179,6 +179,19 @@ CosmicDashboard now ships a complete production-grade toolkit that replaces poin
   * "Clear Cache" button + auto-FIFO (max 100 frames) + cleanup on reset.
   * Perfect for papers/presentations showing how your PRTOE contours tightened or shifted away from ΛCDM as dead points accumulated.
 
+### Cosmo Optimizer & Parameter Profiling Suite (BOBYQA + MCMC + Profile Likelihood)
+To make model exploration and parameter profiling fast and accessible, CosmicDashboard integrates a custom physics-aware optimization and profiling backend (`run_optimizer.py`):
+* **Multi-Start Mode Clustering & Ranking:** Run BOBYQA from multiple starting points (Planck-preferred, SH0ES-preferred, strong/weak coupling) to map out the multimodal posterior. The dashboard automatically clusters similar solutions (using a 5% normalized parameter-space distance) and ranks the unique modes by penalized $\chi^2$.
+* **Physical Viability Score (0–100%):** Separates the raw data fit quality ($\chi^2_{\text{raw}}$) from physical sanity. Unphysical regions (like negative $V_0$, unstable age of the universe, or ghost instabilities in the coupling $\xi_{\text{prtoe}}$) are penalized with a smooth, graduated quadratic penalty instead of hard walls, allowing the optimizer to navigate away safely. The resulting viability score is displayed live in the dashboard.
+* **Laplace Uncertainty & MCMC Sampling:** Estimates correlated parameter errors by computing the full Hessian matrix at the best-fit point. It then automatically launches a short Metropolis-Hastings MCMC chain using the inverted Hessian as the proposal covariance, giving you fast, high-quality marginalized posterior contours for GetDist.
+* **Laplace Bayesian Evidence:** Estimates the log evidence $\ln Z$ using the Laplace approximation (determinant of the Hessian) directly from the peak posterior:
+  $$\ln Z \approx -0.5 \cdot \chi^2_{\text{best}} + \frac{N}{2} \ln(4\pi) - \frac{1}{2} \ln |H|$$
+  This value is automatically written to the `.stats` file and compared against the $\Lambda\text{CDM}$ baseline in the dashboard.
+* **Tension Resolution Heatmap:** Automatically computes the parameter-by-parameter Gaussian tension ($\sigma$) between the discovered modes (e.g., Planck-preferred vs. SH0ES-preferred):
+  $$T_{ij} = \frac{|\mu_i - \mu_j|}{\sqrt{\sigma_i^2 + \sigma_j^2}}$$
+  This is displayed in a dedicated "Mode Tension Analysis" table in the UI.
+* **Targeted Profile Likelihood Scans:** Profile any parameter (e.g., $H_0$) by fixing it on a grid and optimizing all other parameters (with warm-starting for rapid convergence). The dashboard renders the resulting profile likelihood curve showing $\Delta\chi^2$ relative to the unconstrained global best-fit, complete with $1\sigma$ ($\Delta\chi^2=1$) and $2\sigma$ ($\Delta\chi^2=3.84$) threshold lines. Trigger it via the collapsible panel in the dashboard UI or directly from the CLI.
+
 ### Visual & UX Upgrades
 * **"Alive" Nebula Cosmic Portal in the Configuration Upload Zone**:
   * The YAML drop-box is now a *permanent* deep-space visual (real Unsplash nebula photo + rich multi-layer artistic gas clouds in indigos/violets/crimsons/teals/magentas/golds + twinkling stars + dust).

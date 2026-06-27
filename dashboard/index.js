@@ -4,6 +4,9 @@ let activeConfig = 'lcdm_config.yaml';
 let lastStatusData = null;
 let baselineBestChi2 = null;
 let baselineLogEvidence = null;
+let lastBaselineUpdateRun = null;
+let lastBaselineUpdateEvidence = null;
+let isUploadingConfig = false;
 
 // Global chart instances
 let chartWMu = null;
@@ -34,6 +37,7 @@ const yamlName = document.getElementById('yaml-name');
 const btnResetYaml = document.getElementById('btn-reset-yaml');
 
 const btnStart = document.getElementById('btn-start');
+const btnStartOpt = document.getElementById('btn-start-opt');
 const btnResume = document.getElementById('btn-resume');
 const btnStop = document.getElementById('btn-stop');
 const btnDownload = document.getElementById('btn-download');
@@ -85,6 +89,8 @@ const plotTimestamp = document.getElementById('plot-timestamp');
 const valBaseline = document.getElementById('val-baseline');
 const valCustom = document.getElementById('val-custom');
 const valDelta = document.getElementById('val-delta');
+const multimodalComparisonCard = document.getElementById('multimodal-comparison-card');
+const multimodalComparisonBody = document.getElementById('multimodal-comparison-body');
 
 const jeffreysCard = document.getElementById('jeffreys-card');
 const jeffreysText = document.getElementById('jeffreys-text');
@@ -105,11 +111,44 @@ let isAutoRunning = false; // Flag to track and prevent duplicate auto-run trigg
 let watchdogIgnored = false; // Flag to temporarily ignore watchdog
 let lastRunStartTime = null; // Track run start time to persist ignore state across refreshes
 let lastWatchdogAlertCount = 0; // Track watchdog alert count for audio alerts
+let autoWatchdogEnabled = true;
+
+function updateToggleUI() {
+    const toggle = document.getElementById('toggle-auto-watchdog');
+    if (!toggle) return;
+    const handle = toggle.querySelector('.toggle-handle');
+    if (!handle) return;
+    if (autoWatchdogEnabled) {
+        toggle.style.background = '#10ac84';
+        handle.style.left = '18px';
+    } else {
+        toggle.style.background = 'rgba(255,255,255,0.15)';
+        handle.style.left = '2px';
+    }
+}
 
 // Initial setup
 document.addEventListener('DOMContentLoaded', () => {
     fetchBaselines();
     checkStatus();
+    updateToggleUI();
+
+    const toggleAutoWatchdog = document.getElementById('toggle-auto-watchdog');
+    if (toggleAutoWatchdog) {
+        toggleAutoWatchdog.addEventListener('click', async () => {
+            autoWatchdogEnabled = !autoWatchdogEnabled;
+            updateToggleUI();
+            try {
+                await fetch(`${API_URL}/api/settings/watchdog`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auto_apply: autoWatchdogEnabled })
+                });
+            } catch (err) {
+                console.error("Error updating watchdog settings:", err);
+            }
+        });
+    }
     // PERFORMANCE FIX: Reduce polling from 3s to 5s to reduce server load and page refresh lag
     // 5 seconds is still very responsive for long-running MCMC chains
     statusInterval = setInterval(checkStatus, 5000);
@@ -273,7 +312,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnLogout) {
         btnLogout.addEventListener('click', async () => {
             try {
-                await fetch(`${API_URL}/api/logout`, { method: 'POST' });
+                await fetch(`${API_URL}/api/logout`, { method: 'POST', credentials: 'include' });
             } catch(e) {}
             location.reload();
         });
@@ -317,6 +356,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const pasted = prompt('Paste a working phone tunnel URL (e.g. https://abc123.loca.lt) or leave empty to cancel.\n\nUse this for manual "npx localtunnel --port 8000" or if the auto link broke.', current || '');
             if (pasted === null) return; // cancel
             const urlVal = pasted.trim();
+            // Validate URL is HTTP(S) before storing
+            if (urlVal && !urlVal.match(/^https?:\/\//i)) {
+                alert('Invalid URL: must start with http:// or https://');
+                return;
+            }
             try {
                 const resp = await fetch(`${API_URL}/api/set_tunnel_url`, {
                     method: 'POST',
@@ -367,6 +411,11 @@ document.addEventListener('DOMContentLoaded', () => {
             const pasted = prompt('Paste a working phone tunnel URL (e.g. https://abc123.loca.lt) — this activates the Phone Sync link for remote/phone access.\n\nUseful if the launcher phone link "broke", tunnel expired, or you ran npx localtunnel manually in another terminal.', current || '');
             if (pasted === null) return;
             const urlVal = pasted.trim();
+            // Validate URL is HTTP(S) before storing
+            if (urlVal && !urlVal.match(/^https?:\/\//i)) {
+                alert('Invalid URL: must start with http:// or https://');
+                return;
+            }
             try {
                 const resp = await fetch(`${API_URL}/api/set_tunnel_url`, {
                     method: 'POST',
@@ -461,9 +510,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const j = await r.json();
                 const p = j.psis_loo || {};
                 let h = `PSIS-LOO elpd: ${p.elpd_loo || '?'} (SE ${p.se_elpd_loo || '?'}) p_loo=${p.p_loo || '?'} max_k=${p.pareto_k_max || '?'}`;
-                if (p.high_k_warnings && p.high_k_warnings.length) h += `<br><span style="color:#ff9f43">⚠ ${escHtml(p.high_k_warnings.join('; '))}</span>`;
-                if (p.pareto_k_per_obs) h += `<br>k per probe: ${escHtml(p.pareto_k_per_obs.join(', '))}`;
-                advBody.innerHTML = h + `<br><small>${escHtml(p.note || '')}</small>`;
+                if (p.high_k_warnings && p.high_k_warnings.length) h += `<br><span style="color:#ff9f43">⚠ ${p.high_k_warnings.join('; ')}</span>`;
+                if (p.pareto_k_per_obs) h += `<br>k per probe: ${p.pareto_k_per_obs.join(', ')}`;
+                advBody.innerHTML = h + `<br><small>${p.note || ''}</small>`;
             } catch(e) { advBody.textContent = 'PSIS error (run a model).'; }
         });
     }
@@ -476,7 +525,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const r = await fetch(`${API_URL}/api/model_stacking`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({})});
                 const j = await r.json();
                 const s = j.stacking || {};
-                advBody.innerHTML = `Stacking weights: ${escHtml(JSON.stringify(s.stacking_weights || {}))}<br><small>${escHtml(s.note || '')}</small>`;
+                advBody.innerHTML = `Stacking weights: ${JSON.stringify(s.stacking_weights || {})}<br><small>${s.note || ''}</small>`;
             } catch(e) { advBody.textContent = 'Stacking error.'; }
         });
     }
@@ -489,7 +538,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 const r = await fetch(`${API_URL}/api/savage_dickey?param=xi_prtoe&point=0`);
                 const j = await r.json();
                 const sd = j.savage_dickey || {};
-                advBody.innerHTML = `Savage-Dickey BF10 (xi=0): ${escHtml(sd.bf10 || '?')}<br>post@0=${escHtml(sd.posterior_density_at_point || '?')} prior@0=${escHtml(sd.prior_density_at_point || '?')}<br><small>${escHtml(sd.note || '')}</small>`;
+                advBody.innerHTML = `Savage-Dickey BF10 (xi=0): ${sd.bf10 || '?'}<br>post@0=${sd.posterior_density_at_point || '?'} prior@0=${sd.prior_density_at_point || '?'}<br><small>${sd.note || ''}</small>`;
             } catch(e) { advBody.textContent = 'Savage-Dickey error (needs samples + yaml prior).'; }
         });
     }
@@ -893,6 +942,197 @@ async function fetchSysInfo() {
     }
 }
 
+async function fetchMultimodalComparison() {
+    if (!multimodalComparisonCard || !multimodalComparisonBody) return;
+    try {
+        const response = await fetch(`${API_URL}/api/multimodal_comparison`, { credentials: 'include' });
+        if (!response.ok) {
+            multimodalComparisonCard.style.display = 'none';
+            return;
+        }
+        const data = await response.json();
+        if (data.status === 'success' && data.modes && data.modes.length > 0) {
+            multimodalComparisonCard.style.display = 'block';
+            
+            // Build the table html
+            let html = `
+                <table style="width: 100%; border-collapse: collapse; margin-top: 8px; text-align: left; font-size: 0.76rem; border: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.15);">
+                    <thead>
+                        <tr style="border-bottom: 2px solid rgba(255,255,255,0.1); background: rgba(0, 210, 211, 0.1); color: #00d2d3;">
+                            <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Parameter / Metric</th>
+            `;
+            
+            // Mode headers
+            data.modes.forEach(mode => {
+                html += `<th style="padding: 8px 6px; font-weight: bold; text-align: center; border-right: 1px solid rgba(255,255,255,0.05);">${mode.name}</th>`;
+            });
+            html += `</tr></thead><tbody>`;
+            
+            // Row for Total Chi2
+            html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(255, 159, 67, 0.05);">
+                        <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #ff9f43;">Total &chi;&sup2; (Raw)</td>`;
+            data.modes.forEach(mode => {
+                html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: #ff9f43;">${mode.chi2 !== null ? mode.chi2.toFixed(4) : '-'}</td>`;
+            });
+            html += `</tr>`;
+
+            // Row for Viability
+            let hasViability = data.modes.some(mode => mode.viability_score !== undefined);
+            if (hasViability) {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(16, 172, 132, 0.05);">
+                            <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #10ac84;">Physical Viability</td>`;
+                data.modes.forEach(mode => {
+                    const score = mode.viability_score;
+                    let color = "#10ac84";
+                    if (score && parseFloat(score) < 95.0) color = "#ee5253";
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: ${color};">${score ? score : '-'}</td>`;
+                });
+                html += `</tr>`;
+            }
+
+            // Row for Penalized Chi2
+            let hasPenalized = data.modes.some(mode => mode.penalized_chi2 !== undefined);
+            if (hasPenalized) {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(95, 39, 205, 0.05);">
+                            <td style="padding: 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05); color: #5f27cd;">Penalized &chi;&sup2;</td>`;
+                data.modes.forEach(mode => {
+                    const pen = mode.penalized_chi2;
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-weight: bold; color: #5f27cd;">${pen !== undefined && pen !== null ? pen.toFixed(4) : '-'}</td>`;
+                });
+                html += `</tr>`;
+            }
+            
+            // Rows for parameters
+            const allParams = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.params).forEach(k => allParams.add(k));
+            });
+            const sortedParams = Array.from(allParams).sort();
+            
+            sortedParams.forEach(param => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #a4b0be;">${param}</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.params[param];
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-family: var(--font-mono);">${val || '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            // Rows for Derived Metrics
+            const allMetrics = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.metrics).forEach(k => allMetrics.add(k));
+            });
+            const sortedMetrics = Array.from(allMetrics).sort();
+            
+            sortedMetrics.forEach(metric => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05); background: rgba(0, 210, 211, 0.02);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #00d2d3; font-weight: bold;">${metric}</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.metrics[metric];
+                    let cellStyle = "";
+                    if (val && val.includes("PHYSICALLY VIABLE")) {
+                        cellStyle = "color: #10ac84; font-weight: bold;";
+                    } else if (val && val.includes("UNPHYSICAL")) {
+                        cellStyle = "color: #ee5a24; font-weight: bold;";
+                    }
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); ${cellStyle}">${val || '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            // Rows for Likelihoods
+            const allLikes = new Set();
+            data.modes.forEach(mode => {
+                Object.keys(mode.likes).forEach(k => allLikes.add(k));
+            });
+            const sortedLikes = Array.from(allLikes).sort();
+            
+            sortedLikes.forEach(like => {
+                html += `<tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #84817a; font-size: 0.72rem;">&chi;&sup2; (${like.replace('chi2__', '')})</td>`;
+                data.modes.forEach(mode => {
+                    const val = mode.likes[like];
+                    html += `<td style="padding: 6px; text-align: center; border-right: 1px solid rgba(255,255,255,0.05); font-size: 0.72rem; color: #a4b0be;">${val ? parseFloat(val).toFixed(3) : '-'}</td>`;
+                });
+                html += `</tr>`;
+            });
+            
+            html += `</tbody></table>`;
+            multimodalComparisonBody.innerHTML = html;
+
+            // Render Tension Analysis if present
+            const tensionCard = document.getElementById('tension-analysis-card');
+            const tensionBody = document.getElementById('tension-analysis-body');
+            if (tensionCard && tensionBody) {
+                if (data.tensions && data.tensions.length > 0) {
+                    tensionCard.style.display = 'block';
+                    let tHtml = `
+                        <table style="width: 100%; border-collapse: collapse; margin-top: 8px; text-align: left; font-size: 0.76rem; border: 1px solid rgba(255,255,255,0.05); background: rgba(0,0,0,0.15);">
+                            <thead>
+                                <tr style="border-bottom: 2px solid rgba(255,255,255,0.1); background: rgba(238, 82, 83, 0.1); color: #ee5253;">
+                                    <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Modes Compared</th>
+                                    <th style="padding: 8px 6px; font-weight: bold; border-right: 1px solid rgba(255,255,255,0.05);">Parameter</th>
+                                    <th style="padding: 8px 6px; font-weight: bold; text-align: center;">Tension (&sigma;)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+                    data.tensions.forEach(t => {
+                        let badgeColor = "#10ac84";
+                        if (t.value >= 3.0) badgeColor = "#ee5253";
+                        else if (t.value >= 2.0) badgeColor = "#ff9f43";
+                        
+                        tHtml += `
+                            <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
+                                <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #a4b0be;">${t.mode1} vs ${t.mode2}</td>
+                                <td style="padding: 6px; border-right: 1px solid rgba(255,255,255,0.05); color: #00d2d3; font-weight: bold;">${t.param}</td>
+                                <td style="padding: 6px; text-align: center; font-weight: bold; color: ${badgeColor};">${t.value.toFixed(2)} &sigma;</td>
+                            </tr>
+                        `;
+                    });
+                    tHtml += `</tbody></table>`;
+                    tensionBody.innerHTML = tHtml;
+                } else {
+                    tensionCard.style.display = 'none';
+                }
+            }
+
+            // Render Profile Likelihood Scan if present
+            const profileCard = document.getElementById('profile-likelihood-card');
+            const profilePlot = document.getElementById('profile-likelihood-plot');
+            if (profileCard && profilePlot) {
+                const imgUrl = `${API_URL}/profile_likelihood.png?` + new Date().getTime();
+                const img = new Image();
+                img.onload = function() {
+                    profilePlot.src = imgUrl;
+                    profilePlot.style.display = 'block';
+                    profileCard.style.display = 'block';
+                };
+                img.onerror = function() {
+                    profileCard.style.display = 'none';
+                };
+                img.src = imgUrl;
+            }
+        } else {
+            multimodalComparisonCard.style.display = 'none';
+            const tensionCard = document.getElementById('tension-analysis-card');
+            if (tensionCard) tensionCard.style.display = 'none';
+            const profileCard = document.getElementById('profile-likelihood-card');
+            if (profileCard) profileCard.style.display = 'none';
+        }
+    } catch (err) {
+        console.error("Error fetching multimodal comparison:", err);
+        multimodalComparisonCard.style.display = 'none';
+        const tensionCard = document.getElementById('tension-analysis-card');
+        if (tensionCard) tensionCard.style.display = 'none';
+        const profileCard = document.getElementById('profile-likelihood-card');
+        if (profileCard) profileCard.style.display = 'none';
+    }
+}
+
+
 async function refreshDerivedParameters() {
     const body = document.getElementById('derived-params-body');
     if (!body) return;
@@ -924,10 +1164,10 @@ async function refreshDerivedParameters() {
             if (k === 'computed_at' || k === 'engine' || k === 'error') return;
             const label = nice[k] || k;
             const val = typeof d[k] === 'number' ? d[k].toFixed(5) : d[k];
-            html += `<div><span style="color:#a4b0be">${label}:</span> <span style="color:#fff;font-weight:600">${val}</span></div>`;
+            html += `<div><span style="color:#a4b0be">${escHtml(String(label))}:</span> <span style="color:#fff;font-weight:600">${escHtml(String(val))}</span></div>`;
         });
         if (d.engine) {
-            html += `<div style="grid-column:1/-1; font-size:0.68rem; color:#666; margin-top:4px;">Computed with: ${d.engine}</div>`;
+            html += `<div style="grid-column:1/-1; font-size:0.68rem; color:#666; margin-top:4px;">Computed with: ${escHtml(d.engine)}</div>`;
         }
         body.innerHTML = html || '<div style="color:#a4b0be">No standard deriveds available for this model</div>';
     } catch (e) {
@@ -1015,16 +1255,37 @@ async function buildGeneralPlaygroundSliders() {
         }
         params.forEach(p => {
             const div = document.createElement('div');
-            div.innerHTML = `
-                <div style="display:flex; justify-content:space-between; color:#fff; margin-bottom:2px; font-size:0.75rem;">
-                    <span>${p.latex || p.name}:</span>
-                    <span id="val-gen-${p.name}" style="font-family:var(--font-mono);color:#00d2d3;">${p.ref.toFixed(4)}</span>
-                </div>
-                <input type="range" class="play-slider gen-slider" data-param="${p.name}" min="${p.min}" max="${p.max}" step="${(p.max-p.min)/100}" value="${p.ref}" style="width:100%; height:5px; accent-color:#00d2d3; background:rgba(255,255,255,0.1); border-radius:3px;">
-            `;
-            container.appendChild(div);
-            const slider = div.querySelector('.gen-slider');
-            const valSpan = div.querySelector(`#val-gen-${p.name}`);
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = p.latex || p.name;
+            const valSpan = document.createElement('span');
+            valSpan.id = `val-gen-${p.name}`;
+            valSpan.style.fontFamily = 'var(--font-mono)';
+            valSpan.style.color = '#00d2d3';
+            valSpan.textContent = p.ref.toFixed(4);
+            
+            const headerDiv = document.createElement('div');
+            headerDiv.style.display = 'flex';
+            headerDiv.style.justifyContent = 'space-between';
+            headerDiv.style.color = '#fff';
+            headerDiv.style.marginBottom = '2px';
+            headerDiv.style.fontSize = '0.75rem';
+            headerDiv.appendChild(nameSpan);
+            headerDiv.appendChild(valSpan);
+            
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.className = 'play-slider gen-slider';
+            slider.dataset.param = p.name;
+            slider.min = p.min;
+            slider.max = p.max;
+            slider.step = (p.max - p.min) / 100;
+            slider.value = p.ref;
+            slider.style.width = '100%';
+            slider.style.height = '5px';
+            slider.style.accentColor = '#00d2d3';
+            slider.style.background = 'rgba(255,255,255,0.1)';
+            slider.style.borderRadius = '3px';
+            
             slider.addEventListener('input', () => {
                 valSpan.textContent = parseFloat(slider.value).toFixed(4);
                 // debounce update
@@ -1033,6 +1294,10 @@ async function buildGeneralPlaygroundSliders() {
                     updateGeneralPlayground();
                 }, 200);
             });
+            
+            div.appendChild(headerDiv);
+            div.appendChild(slider);
+            container.appendChild(div);
         });
         // initial draw
         updateGeneralPlayground();
@@ -1173,6 +1438,13 @@ function setupUploadZone(zone, input, handler) {
         input.value = ''; // Reset value to force 'change' event even for the same file
         input.click();
     });
+    zone.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            input.value = '';
+            input.click();
+        }
+    });
     zone.addEventListener('dragover', (e) => {
         e.preventDefault();
         zone.classList.add('active');
@@ -1195,6 +1467,7 @@ function setupUploadZone(zone, input, handler) {
 
 // YAML Configuration upload
 async function handleYamlUpload(file) {
+    isUploadingConfig = true;
     // Optimistically set the active config and UI immediately on selection.
     // Upload will copy content to uploaded_config.yaml on server.
     // This prevents starting with stale activeConfig (e.g. default lcdm) if user starts run
@@ -1211,6 +1484,7 @@ async function handleYamlUpload(file) {
     
     // Temporarily disable start/resume during upload to avoid race with activeConfig.
     if (btnStart) btnStart.disabled = true;
+    if (btnStartOpt) btnStartOpt.disabled = true;
     if (btnResume) btnResume.disabled = true;
     
     const formData = new FormData();
@@ -1235,8 +1509,10 @@ async function handleYamlUpload(file) {
         appendLog(`Upload error: ${err.message}`);
         switchToLcdm();
     } finally {
+        isUploadingConfig = false;
         // Re-enable buttons (status check will manage based on run state)
         if (btnStart) btnStart.disabled = false;
+        if (btnStartOpt) btnStartOpt.disabled = false;
         if (btnResume) btnResume.disabled = false;
     }
 }
@@ -1251,11 +1527,45 @@ btnStart.addEventListener('click', () => {
         () => triggerRun(true)
     );
 });
+if (btnStartOpt) {
+    btnStartOpt.addEventListener('click', () => {
+        showConfirmationModal(
+            "Start Optimized Run",
+            "Are you sure you want to start a fast cosmological optimization run using BOBYQA? This will terminate any active run and launch the new optimizer.",
+            "Yes, Start Optimization",
+            "Cancel",
+            () => triggerRun(true, true)
+        );
+    });
+}
+const btnStartProfile = document.getElementById('btn-start-profile');
+if (btnStartProfile) {
+    btnStartProfile.addEventListener('click', () => {
+        const param = document.getElementById('profile-param').value;
+        const minVal = parseFloat(document.getElementById('profile-min').value);
+        const maxVal = parseFloat(document.getElementById('profile-max').value);
+        const steps = parseInt(document.getElementById('profile-steps').value) || 8;
+        
+        let range = null;
+        if (!isNaN(minVal) && !isNaN(maxVal)) {
+            range = [minVal, maxVal];
+        }
+        
+        showConfirmationModal(
+            "Start Profile Likelihood Scan",
+            `Are you sure you want to start a Profile Likelihood Scan for parameter ${param}? This will fix ${param} at ${steps} points and optimize all other parameters at each step.`,
+            "Yes, Start Scan",
+            "Cancel",
+            () => triggerRun(true, true, param, range, steps)
+        );
+    });
+}
 btnResume.addEventListener('click', () => triggerRun(false));
 
-async function triggerRun(forceOverwrite) {
+async function triggerRun(forceOverwrite, isOptimizer = false, profileParam = null, profileRange = null, profileSteps = 8) {
     isAutoRunning = false;
     btnStart.disabled = true;
+    if (btnStartOpt) btnStartOpt.disabled = true;
     btnResume.disabled = true;
     const cores = inputCores ? (parseInt(inputCores.value) || 24) : 24;
     
@@ -1272,7 +1582,15 @@ async function triggerRun(forceOverwrite) {
     const configForLog = (yamlName && yamlName.textContent && yamlName.textContent.includes('.')) 
         ? yamlName.textContent 
         : activeConfig;
-    appendLog(`Starting PolyChord nested sampling on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+    if (isOptimizer) {
+        if (profileParam) {
+            appendLog(`Starting Profile Scan for ${profileParam} on ${cores} cores with config: ${configForLog}...`);
+        } else {
+            appendLog(`Starting Cosmo Optimizer on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+        }
+    } else {
+        appendLog(`Starting PolyChord nested sampling on ${cores} cores with config: ${configForLog} (active slot: ${activeConfig})...`);
+    }
     
     try {
         const response = await fetch(`${API_URL}/api/start_run`, {
@@ -1282,7 +1600,14 @@ async function triggerRun(forceOverwrite) {
                 config_name: activeConfig,
                 cores: cores,
                 auto_rebuild: autoRebuild,
-                force_overwrite: forceOverwrite
+                force_overwrite: forceOverwrite,
+                is_optimizer: isOptimizer,
+                optimizer_method: "bobyqa",
+                optimizer_multistart: isOptimizer && !profileParam ? 4 : 1,
+                optimizer_mcmc_steps: isOptimizer && !profileParam ? 100 : 0,
+                profile_param: profileParam,
+                profile_range: profileRange,
+                profile_steps: profileSteps
             })
         });
         const data = await response.json();
@@ -1294,11 +1619,13 @@ async function triggerRun(forceOverwrite) {
         } else {
             appendLog(`Failed to start: ${data.detail}`);
             btnStart.disabled = false;
+            if (btnStartOpt) btnStartOpt.disabled = false;
             btnResume.disabled = false;
         }
     } catch (err) {
         appendLog(`Execution error: ${err.message}`);
         btnStart.disabled = false;
+        if (btnStartOpt) btnStartOpt.disabled = false;
         btnResume.disabled = false;
     }
 }
@@ -1416,7 +1743,7 @@ async function updateBaseline(dataset, evidence, chi2, evidenceIsFinal, evidence
 // Check current status
 async function checkStatus() {
     try {
-        const response = await fetch(`${API_URL}/api/status`);
+        const response = await fetch(`${API_URL}/api/status`, { credentials: 'include' });
         if (response.status === 401) {
             showLoginModal(() => checkStatus());  // retry after login
             return;
@@ -1425,16 +1752,22 @@ async function checkStatus() {
         const data = await response.json();
         lastStatusData = data;
         
+        if (data.auto_apply_watchdog !== undefined && data.auto_apply_watchdog !== autoWatchdogEnabled) {
+            autoWatchdogEnabled = data.auto_apply_watchdog;
+            updateToggleUI();
+        }
+        
         // Refresh drool-worthy derived params when we have new best-fit info
         if (data.best_fit || data.chi2 || data.evidence) {
             refreshDerivedParameters();
+            fetchMultimodalComparison();
         }
         
         // Update Phone Sync link
         const phoneLinkContainer = document.getElementById('phone-link-container');
         const phoneLinkHref = document.getElementById('phone-link-href');
         if (phoneLinkContainer && phoneLinkHref) {
-            if (data.localtunnel_url) {
+            if (data.localtunnel_url && data.localtunnel_url.match(/^https?:\/\//i)) {
                 phoneLinkContainer.style.display = 'flex';
                 phoneLinkHref.href = data.localtunnel_url;
                 phoneLinkHref.textContent = data.localtunnel_url.replace(/^https?:\/\//, '');
@@ -1457,7 +1790,7 @@ async function checkStatus() {
         
         // Append external logs (from monitor script)
         if (data.external_logs && data.external_logs.length > 0) {
-            data.external_logs.forEach(log => appendLog(`<span style="color: #ff4757; font-weight: bold;">[ALERT] ${log}</span>`));
+            data.external_logs.forEach(log => appendLog(`[ALERT] ${log}`));
         }
         
         if (data.terminal_output && data.terminal_output.length > 0) {
@@ -1562,8 +1895,8 @@ async function checkStatus() {
             statChi2.textContent = data.best_chi2.toFixed(2);
             if (data.best_cmb !== null && data.best_cmb !== undefined) {
                 statChi2Cmb.textContent = data.best_cmb.toFixed(1);
-                statChi2Bao.textContent = data.best_bao.toFixed(1);
-                statChi2Sn.textContent = data.best_sn.toFixed(1);
+                statChi2Bao.textContent = data.best_bao !== null && data.best_bao !== undefined ? data.best_bao.toFixed(1) : "-";
+                statChi2Sn.textContent = data.best_sn !== null && data.best_sn !== undefined ? data.best_sn.toFixed(1) : "-";
             }
         } else {
             statChi2.textContent = "-";
@@ -1600,7 +1933,7 @@ async function checkStatus() {
             for (const [key, val] of Object.entries(data.best_raw_params)) {
                 if (!key.startsWith('chi2__') && !key.startsWith('minuslogprior')) {
                     let formattedVal = (typeof val === 'number') ? val.toPrecision(4) : val;
-                    rawHtml += `<div><span style="color:#00d2d3">${key}</span>: ${formattedVal}</div>`;
+                    rawHtml += `<div><span style="color:#00d2d3">${escHtml(key)}</span>: ${escHtml(String(formattedVal))}</div>`;
                 }
             }
             rawHtml += '</div>';
@@ -1621,7 +1954,7 @@ async function checkStatus() {
             constraintsCard.style.display = 'block';
             let constraintsHtml = '<div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 4px; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 5px;">';
             data.constraints.forEach(c => {
-                constraintsHtml += `<div><span style="color:#00d2d3">${c.parameter}</span></div><div>${c.mean} &plusmn; ${c.error}</div>`;
+                constraintsHtml += `<div><span style="color:#00d2d3">${escHtml(c.parameter)}</span></div><div>${escHtml(String(c.mean))} &plusmn; ${escHtml(String(c.error))}</div>`;
             });
             constraintsHtml += '</div>';
             constraintsBody.innerHTML = constraintsHtml;
@@ -1816,15 +2149,20 @@ async function checkStatus() {
         if (data.status === 'running') {
             isAutoRunning = false;
             btnStart.disabled = true;
+            if (btnStartOpt) btnStartOpt.disabled = true;
             btnResume.disabled = true;
             btnStop.disabled = false;
             
             let chi2Text = data.best_chi2 !== null ? data.best_chi2.toFixed(4) : 'evaluating';
             let logZText = data.log_evidence !== null ? data.log_evidence.toFixed(4) : 'evaluating';
         } else {
-            btnStart.disabled = false;
-            btnResume.disabled = false;
+            // Always disable Stop when not running, even during upload
             btnStop.disabled = true;
+            if (!isUploadingConfig) {
+                btnStart.disabled = false;
+                if (btnStartOpt) btnStartOpt.disabled = false;
+                btnResume.disabled = false;
+            }
         }
 
         // Manage persisted watchdog ignore state
@@ -1868,9 +2206,9 @@ async function checkStatus() {
                         currentProposedUpdates[alert.parameter] = {min: alert.new_min, max: alert.new_max};
                     }
                     return `<div style="margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.1);">
-                        <strong style="color: #ff9ff3; font-size: 1.1rem;">${alert.parameter}</strong><br>
-                        <span style="color: #feca57;">${alert.status}</span><br>
-                        <span style="color: #a4b0be; font-size: 0.85rem;">Suggestion: <span style="color: #fff;">${alert.suggestion}</span></span>
+                        <strong style="color: #ff9ff3; font-size: 1.1rem;">${escHtml(alert.parameter)}</strong><br>
+                        <span style="color: #feca57;">${escHtml(alert.status)}</span><br>
+                        <span style="color: #a4b0be; font-size: 0.85rem;">Suggestion: <span style="color: #fff;">${escHtml(alert.suggestion)}</span></span>
                     </div>`;
                 }).join("");
 
@@ -2038,8 +2376,17 @@ async function checkStatus() {
                               yamlNameLower.includes('lcdm') ||
                               yamlNameLower.includes('baseline');
             if (isLcdmRun) {
-                updateBaseline("planck_bao_pantheonplus_shoes", data.log_evidence, data.best_chi2, data.evidence_is_final, data.evidence_source);
-                if (checkAutoRunCustom && checkAutoRunCustom.checked && !isAutoRunning) {
+                const currentRunId = data.active_output_prefix || data.active_yaml_path;
+                const currentEvidence = data.log_evidence;
+                // Allow update if it's a new run OR if evidence changed for the same run
+                const shouldUpdate = lastBaselineUpdateRun !== currentRunId || 
+                                    (lastBaselineUpdateEvidence !== currentEvidence && lastBaselineUpdateRun === currentRunId);
+                if (shouldUpdate) {
+                    updateBaseline("planck_bao_pantheonplus_shoes", data.log_evidence, data.best_chi2, data.evidence_is_final, data.evidence_source);
+                    lastBaselineUpdateRun = currentRunId;
+                    lastBaselineUpdateEvidence = currentEvidence;
+                }
+                if (data.evidence_is_final && checkAutoRunCustom && checkAutoRunCustom.checked && !isAutoRunning) {
                     isAutoRunning = true;
                     appendLog(`[PIPELINE] Baseline ΛCDM completed. Preparing to auto-run custom model in 5 seconds...`);
                     setTimeout(() => {
@@ -2053,7 +2400,7 @@ async function checkStatus() {
                 } else {
                     appendLog('[PIPELINE] Live/preview evidence is visible for debugging only; final preference waits for PolyChord .stats.');
                 }
-                if (checkAutoRunLcdm && checkAutoRunLcdm.checked && !isAutoRunning) {
+                if (data.evidence_is_final && checkAutoRunLcdm && checkAutoRunLcdm.checked && !isAutoRunning) {
                     isAutoRunning = true;
                     appendLog(`[PIPELINE] Custom model completed. Preparing to auto-run baseline ΛCDM in 5 seconds...`);
                     setTimeout(() => {
@@ -2215,8 +2562,6 @@ document.getElementById('btn-clear-report').addEventListener('click', async () =
             watchdogText.style.textShadow = "0 0 10px rgba(0, 210, 211, 0.5)";
             watchdogText.innerText = "All clear, Captain!";
             watchdogDesc.style.display = "none";
-            watchdogDesc.style.maxHeight = '200px';
-            watchdogDesc.innerHTML = "";
             document.getElementById('watchdog-actions').style.display = 'none';
             document.getElementById('watchdog-prioractions').style.display = 'none';
             document.getElementById('watchdog-utilactions').style.display = 'none';
@@ -2267,7 +2612,6 @@ document.getElementById('btn-clear-log').addEventListener('click', async () => {
 });
 
 document.getElementById('btn-open-logfile').addEventListener('click', () => {
-    // Open the current run's log file in a new tab
     const configName = activeConfig || 'unknown';
     const logFileName = configName.replace(/\.ya?ml$/, '') + '_polychord.log';
     window.open(`chains/${logFileName}`, '_blank');
@@ -2282,12 +2626,13 @@ function escHtml(str) {
 }
 
 // Console helper
-function appendLog(message) {
+function appendLog(message, { html = false } = {}) {
     // Remove initial placeholder if present
     if (localLogs.length === 1 && localLogs[0] === 'Waiting for run execution...') {
         localLogs = [];
     }
-    localLogs.push(`[${new Date().toLocaleTimeString()}] ${message}`);
+    const safeMessage = html ? String(message) : escHtml(String(message));
+    localLogs.push(`[${escHtml(new Date().toLocaleTimeString())}] ${safeMessage}`);
     if (localLogs.length > 50) localLogs.shift();
     renderLogs();
 }
@@ -2300,7 +2645,7 @@ function renderLogs() {
             return esc.replace(/(\[.*?\])/g, '<span style="color:#feca57">$1</span>');
         }).join('<br>') + '<br><br><span style="color:#a4b0be; font-weight:bold;">--- DASHBOARD STATUS LOGS ---</span><br>';
     }
-    html += localLogs.join('<br>');
+    html += localLogs.map(l => escHtml(String(l))).join('<br>');
     consoleBody.innerHTML = html;
     consoleBody.scrollTop = consoleBody.scrollHeight;
 }
@@ -2546,6 +2891,18 @@ ${strugglesText}`;
             // grab visible text
             text += body.innerText || body.textContent;
             copyToClipboard(text, 'btn-copy-derived');
+        });
+    }
+
+    // 4.6 Copy Multimodal Comparison (new)
+    const btnCopyMultimodal = document.getElementById('btn-copy-multimodal');
+    if (btnCopyMultimodal) {
+        btnCopyMultimodal.addEventListener('click', () => {
+            const body = document.getElementById('multimodal-comparison-body');
+            if (!body) return;
+            let text = '--- Multimodal Cosmological Exploration Comparison ---\n';
+            text += body.innerText || body.textContent;
+            copyToClipboard(text, 'btn-copy-multimodal');
         });
     }
 
@@ -2925,7 +3282,7 @@ Interpret the BF10. If >>1, the data require the extra PRTOE parameters. Contras
             const jeff = document.getElementById('jeffreys-text') ? document.getElementById('jeffreys-text').textContent : "-";
             const delta = document.getElementById('val-delta') ? document.getElementById('val-delta').textContent : "-";
 
-            const diagnosticPrompt = typeof buildMainDiagnosticPrompt === 'function' ? buildMainDiagnosticPrompt() : `You are a theoretical cosmologist analyzing a CLASS/Cobaya/PolyChord run.
+            const diagnosticPrompt = `You are a theoretical cosmologist analyzing a CLASS/Cobaya/PolyChord run.
 
 Run status: ${status}
 Active config: ${lastStatusData.active_yaml_path || 'unknown'}
@@ -3537,7 +3894,9 @@ async function refreshCompare() {
             const logzStr = m.logz !== null ? `${m.logz.toFixed(2)} +/- ${m.logz_err.toFixed(2)}` : "-";
             const h0Str = m.h0_tension !== null ? `${m.h0_tension.toFixed(2)}σ (${m.h0_val.toFixed(2)})` : (m.h0_val !== null ? m.h0_val.toFixed(2) : "-");
             const s8Str = m.s8_tension !== null ? `${m.s8_tension.toFixed(2)}σ (${m.s8_val.toFixed(3)})` : (m.s8_val !== null ? m.s8_val.toFixed(3) : "-");
-            const wParams = `${m.w0.toFixed(2)}, ${m.wa.toFixed(2)}`;
+            const w0 = m.w0 !== null && m.w0 !== undefined ? m.w0.toFixed(2) : "-";
+            const wa = m.wa !== null && m.wa !== undefined ? m.wa.toFixed(2) : "-";
+            const wParams = `${w0}, ${wa}`;
             
             const tr = document.createElement('tr');
             tr.style.borderBottom = "1px solid rgba(255,255,255,0.05)";
@@ -4124,7 +4483,7 @@ async function refreshLikelihoodTerrain() {
     const p2 = ySelect.value || "omega_cdm";
     
     try {
-        const res = await fetch(`${API_URL}/api/likelihood_terrain?param1=${p1}&param2=${p2}&config_name=${encodeURIComponent(activeConfig)}`);
+        const res = await fetch(`${API_URL}/api/likelihood_terrain?param1=${encodeURIComponent(p1)}&param2=${encodeURIComponent(p2)}&config_name=${encodeURIComponent(activeConfig)}`);
         if (res.ok) {
             const data = await res.json();
             if (data.status === "success" && data.points) {
@@ -4310,6 +4669,7 @@ async function refreshTemplatesList() {
                     "lcdm_baseline": "ΛCDM Baseline",
                     "prtoe_standard": "PRTOE Standard",
                     "wcdm_test": "wCDM Test",
+                    "ede_test": "EDE Test (Model Zoo)",
                     "last_run": "Last Run"
                 };
                 
@@ -4343,7 +4703,7 @@ async function refreshChainQuality() {
     const selectedParam = selectEl.value || "H0";
     
     try {
-        const res = await fetch(`${API_URL}/api/chain_quality?param=${selectedParam}&config_name=${encodeURIComponent(activeConfig)}`);
+        const res = await fetch(`${API_URL}/api/chain_quality?param=${encodeURIComponent(selectedParam)}&config_name=${encodeURIComponent(activeConfig)}`);
         if (res.ok) {
             const data = await res.json();
             if (data.status === "success") {
@@ -4700,7 +5060,7 @@ async function handleCompareRuns() {
 
                     html += `
                         <tr style="border-bottom: 1px solid rgba(255,255,255,0.05);">
-                            <td style="padding: 6px; font-weight: bold; color: #ff9ff3;">${param}</td>
+                            <td style="padding: 6px; font-weight: bold; color: #ff9ff3;">${escHtml(String(param))}</td>
                             <td style="padding: 6px; font-family: var(--font-mono);">${meanA.toFixed(4)} &plusmn; ${errA.toFixed(4)}</td>
                             <td style="padding: 6px; font-family: var(--font-mono);">${meanB.toFixed(4)} &plusmn; ${errB.toFixed(4)}</td>
                             <td style="padding: 6px; font-family: var(--font-mono); color: ${shiftColor};">${shift >= 0 ? '+' : ''}${shift.toFixed(4)}</td>
@@ -4792,27 +5152,55 @@ async function refreshCheckpointsList() {
                     return;
                 }
                 
-                listContainer.innerHTML = data.checkpoints.map(cp => {
+                listContainer.innerHTML = '';
+                data.checkpoints.forEach(cp => {
                     const pctText = cp.percentage !== null ? `${cp.percentage}%` : 'unknown %';
                     const deadText = cp.dead_points ? `${cp.dead_points} dead pts` : '';
                     const detail = `${pctText} (${deadText || 'no points'}) - ${cp.created_time}`;
-                    return `
-                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; background: rgba(255,255,255,0.03); border-radius: 4px; border: 1px solid rgba(255,255,255,0.05);">
-                            <div style="display: flex; flex-direction: column; gap: 2px;">
-                                <span style="font-weight: bold; color: #ff9ff3;">${cp.name}</span>
-                                <span style="font-size: 0.7rem; color: #a4b0be;">${detail}</span>
-                            </div>
-                            <button class="btn btn-secondary btn-restore-checkpoint" data-checkpoint="${cp.name}" style="padding: 3px 8px; font-size: 0.72rem; cursor: pointer; border-radius: 3px;">Restore</button>
-                        </div>
-                    `;
-                }).join('');
-                
-                // Add event listeners to restore buttons
-                listContainer.querySelectorAll('.btn-restore-checkpoint').forEach(btn => {
-                    btn.addEventListener('click', () => {
-                        const name = btn.getAttribute('data-checkpoint');
-                        restoreCheckpoint(name);
+                    
+                    const itemDiv = document.createElement('div');
+                    itemDiv.style.display = 'flex';
+                    itemDiv.style.justifyContent = 'space-between';
+                    itemDiv.style.alignItems = 'center';
+                    itemDiv.style.padding = '6px 8px';
+                    itemDiv.style.background = 'rgba(255,255,255,0.03)';
+                    itemDiv.style.borderRadius = '4px';
+                    itemDiv.style.border = '1px solid rgba(255,255,255,0.05)';
+                    
+                    const infoDiv = document.createElement('div');
+                    infoDiv.style.display = 'flex';
+                    infoDiv.style.flexDirection = 'column';
+                    infoDiv.style.gap = '2px';
+                    
+                    const nameSpan = document.createElement('span');
+                    nameSpan.style.fontWeight = 'bold';
+                    nameSpan.style.color = '#ff9ff3';
+                    nameSpan.textContent = cp.name;
+                    
+                    const detailSpan = document.createElement('span');
+                    detailSpan.style.fontSize = '0.7rem';
+                    detailSpan.style.color = '#a4b0be';
+                    detailSpan.textContent = detail;
+                    
+                    infoDiv.appendChild(nameSpan);
+                    infoDiv.appendChild(detailSpan);
+                    
+                    const restoreBtn = document.createElement('button');
+                    restoreBtn.className = 'btn btn-secondary btn-restore-checkpoint';
+                    restoreBtn.dataset.checkpoint = cp.name;
+                    restoreBtn.style.padding = '3px 8px';
+                    restoreBtn.style.fontSize = '0.72rem';
+                    restoreBtn.style.cursor = 'pointer';
+                    restoreBtn.style.borderRadius = '3px';
+                    restoreBtn.textContent = 'Restore';
+                    
+                    restoreBtn.addEventListener('click', () => {
+                        restoreCheckpoint(cp.name);
                     });
+                    
+                    itemDiv.appendChild(infoDiv);
+                    itemDiv.appendChild(restoreBtn);
+                    listContainer.appendChild(itemDiv);
                 });
             }
         }
@@ -5179,7 +5567,7 @@ async function checkIntergalacticTrigger() {
                 if (delta_logz >= 5.0) {
                     intergalacticPlaying = true;
                     localStorage.setItem('intergalacticPlayed', 'true');
-                    appendLog("<span style='color: #ff9ff3; font-weight: bold;'>🌌 [CELEBRATION] PRTOE has strong evidence (ΔlogZ = " + delta_logz.toFixed(2) + " >= 5)! Playing Beastie Boys: Intergalactic! 🚀</span>");
+                    appendLog("<span style='color: #ff9ff3; font-weight: bold;'>🌌 [CELEBRATION] PRTOE has strong evidence (ΔlogZ = " + delta_logz.toFixed(2) + " >= 5)! Playing Beastie Boys: Intergalactic! 🚀</span>", { html: true });
                     playIntergalacticSynth();
                 }
             }
@@ -5194,6 +5582,25 @@ function playIntergalacticSynth() {
     // Using a reliable YouTube embed that allows autoplay
     
     try {
+        // Check if user has opted in to third-party YouTube autoplay
+        const youtubeOptIn = localStorage.getItem('youtubeAutoplayOptIn') === 'true';
+        
+        if (!youtubeOptIn) {
+            // Use local synth only if user hasn't opted in to YouTube
+            if ('speechSynthesis' in window) {
+                const u = new SpeechSynthesisUtterance("Intergalactic, planetary, planetary, intergalactic.");
+                u.pitch = 0.5;
+                u.rate = 0.82;
+                window.speechSynthesis.speak(u);
+            }
+            appendLog("<span style='color: #ff9ff3; font-weight: bold;'>🎵 Celebration! Enable YouTube autoplay in settings for full song 🎵</span>", { html: true });
+            setTimeout(() => {
+                intergalacticPlaying = false;
+                appendLog("<span style='color: #00d2ff;'>🌌 Celebration complete! 🌌</span>", { html: true });
+            }, 5000);
+            return;
+        }
+        
         // Create an audio element with the full song
         const audio = new Audio();
         
@@ -5209,7 +5616,7 @@ function playIntergalacticSynth() {
         document.body.appendChild(iframe);
         
         // Show a celebration message with song info
-        appendLog("<span style='color: #ff9ff3; font-weight: bold;'>🎵 Now playing: Beastie Boys - Intergalactic (Full Song) 🎵</span>");
+        appendLog("<span style='color: #ff9ff3; font-weight: bold;'>🎵 Now playing: Beastie Boys - Intergalactic (Full Song) 🎵</span>", { html: true });
         
         // Also play the vocoder voice for extra effect at the start
         if ('speechSynthesis' in window) {
@@ -5225,7 +5632,7 @@ function playIntergalacticSynth() {
                 iframe.parentNode.removeChild(iframe);
             }
             intergalacticPlaying = false;
-            appendLog("<span style='color: #00d2ff;'>🌌 Celebration complete! 🌌</span>");
+            appendLog("<span style='color: #00d2ff;'>🌌 Celebration complete! 🌌</span>", { html: true });
         }, 235000); // 235 seconds to ensure full song plays
         
     } catch (e) {

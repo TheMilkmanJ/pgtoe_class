@@ -217,16 +217,20 @@ def resolve_cobaya_runtime(engine: Optional[dict] = None) -> tuple:
     python_exe = os.environ.get("DASHBOARD_PYTHON") or engine.get("python_exe")
 
     if not python_exe:
-        pgtoe_py = os.path.join(DEFAULT_CONDA_ROOT, "envs", DEFAULT_COBAYA_ENV, "bin", "python3")
-        if os.path.isfile(pgtoe_py):
-            python_exe = pgtoe_py
-        else:
+        # Search candidate envs in order
+        for env_name in ["pgtoe_gold", "cobaya_prod", "pgtoe_plat", "prtoe_gold"]:
+            pgtoe_py = os.path.join(DEFAULT_CONDA_ROOT, "envs", env_name, "bin", "python3")
+            if os.path.isfile(pgtoe_py):
+                python_exe = pgtoe_py
+                break
+        if not python_exe:
             conda_prefix_env = os.environ.get("CONDA_PREFIX", "")
             if conda_prefix_env:
                 cand = os.path.join(conda_prefix_env, "bin", "python3")
                 python_exe = cand if os.path.isfile(cand) else (shutil.which("python3") or "python3")
             else:
                 python_exe = shutil.which("python3") or "python3"
+
 
     # Infer the correct conda prefix from the actual python we'll run
     conda_prefix = _conda_prefix_from_python(python_exe) or os.environ.get("CONDA_PREFIX", "")
@@ -902,6 +906,13 @@ class RunConfig(BaseModel):
     cores: int = min(psutil.cpu_count(logical=False) or 4, 4)
     auto_rebuild: bool = True
     force_overwrite: Optional[bool] = None
+    is_optimizer: bool = False
+    optimizer_method: str = "bobyqa"
+    optimizer_multistart: int = 1
+    optimizer_mcmc_steps: int = 100
+    profile_param: Optional[str] = None
+    profile_range: Optional[list[float]] = None
+    profile_steps: int = 8
 
     @field_validator('config_name')
     @classmethod
@@ -999,7 +1010,9 @@ class StateManager:
         self.external_logs = []
         self.active_yaml_path = ""
         self.current_status = "idle"
+        self.is_optimizer = False
         self.watchdog_alerts = []
+        self.auto_apply_watchdog = True
         self.run_start_time = None
         self.localtunnel_url = None
         self.cosmo_curves_cache = None
@@ -1161,8 +1174,16 @@ def _load_json_store(path: Path, default: dict) -> dict:
 def _save_json_store(path: Path, data: dict):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        def json_ready(value):
+            if isinstance(value, collections.deque):
+                return list(value)
+            if isinstance(value, dict):
+                return {k: json_ready(v) for k, v in value.items()}
+            if isinstance(value, (list, tuple)):
+                return [json_ready(v) for v in value]
+            return value
         with open(path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+            json.dump(json_ready(data), f, indent=2)
     except Exception:
         pass
 
@@ -2162,7 +2183,7 @@ def get_classy_for_engine(engine: dict | None = None):
             added.append(engine["class_path"])
         # Attempt to clear previous classy to allow swap (best-effort)
         for mod in list(sys.modules.keys()):
-            if mod == "classy" or mod.startswith("classy."):
+            if "classy" in mod:
                 del sys.modules[mod]
         from classy import Class
         return Class
@@ -2742,14 +2763,31 @@ def find_and_adopt_running_cobaya():
                     state.active_yaml_path = yaml_file
                     state.active_output_prefix = get_output_prefix_from_yaml(state.active_yaml_path)
                     state.current_status = "running"
+                    state.is_optimizer = False
                     state.run_start_time = proc.info.get('create_time')
                     log_dashboard_error(f"✅ Adopted running Cobaya process: PID {pid}, Config: {state.active_yaml_path}, Output Prefix: {state.active_output_prefix}", console=True)
+                    break
+            elif "run_optimizer.py" in cmd_str:
+                yaml_file = None
+                for arg in cmdline:
+                    if arg.endswith(('.yaml', '.ini')):
+                        yaml_file = arg
+                        break
+                if yaml_file:
+                    pid = proc.info['pid']
+                    state.running_process = AdoptedProcess(pid)
+                    state.active_yaml_path = yaml_file
+                    state.active_output_prefix = get_output_prefix_from_yaml(state.active_yaml_path)
+                    state.current_status = "running"
+                    state.is_optimizer = True
+                    state.run_start_time = proc.info.get('create_time')
+                    log_dashboard_error(f"✅ Adopted running Optimizer process: PID {pid}, Config: {state.active_yaml_path}, Output Prefix: {state.active_output_prefix}", console=True)
                     break
         except Exception:
             continue
 
     # Also adopt the running monitor script (plot_chains.py) if the run is active
-    if state.running_process is not None and state.monitor_process is None:
+    if state.running_process is not None and state.monitor_process is None and not getattr(state, 'is_optimizer', False):
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
                 cmdline = proc.info.get('cmdline')
@@ -3223,6 +3261,7 @@ async def get_status():
         "external_logs": list(state.external_logs),
         "class_error_logs": [],
         "watchdog_alerts": state.watchdog_alerts,
+        "auto_apply_watchdog": state.auto_apply_watchdog,
         "speed": "-",
         "eta": "-",
         "constraints": [],
@@ -4267,27 +4306,48 @@ async def start_run(config: RunConfig, request: Request = None):
         _cur_ld = _run_env.get("LD_LIBRARY_PATH", "")
         _run_env["LD_LIBRARY_PATH"] = _clik_lib + (os.pathsep + _cur_ld if _cur_ld else "")
 
-    # --- Use --no-mpi to bypass MPICH segfault under WSL ---
-    # PolyChord and MPICH together crash with signal 11 on WSL2 kernel 6.6.87.
-    # Running in serial (--no-mpi) is safer and avoids the MPI process tree complexity.
-    cobaya_cmd = [
-        python_executable, "-m", "cobaya", "run",
-        str(config_file),
-        "--packages-path", cobaya_packages_path,
-        run_flag,
-    ]
+    state.is_optimizer = config.is_optimizer
+
+    if config.is_optimizer:
+        cobaya_cmd = [
+            python_executable, "-u", "run_optimizer.py",
+            str(config_file),
+            "--packages-path", cobaya_packages_path,
+            "--cores", str(config.cores),
+            "--method", config.optimizer_method,
+            "--multistart", str(config.optimizer_multistart),
+            "--mcmc-steps", str(config.optimizer_mcmc_steps)
+        ]
+        if config.profile_param:
+            cobaya_cmd.extend(["--profile", config.profile_param])
+            if config.profile_range:
+                cobaya_cmd.extend(["--profile-range", str(config.profile_range[0]), str(config.profile_range[1])])
+            cobaya_cmd.extend(["--profile-steps", str(config.profile_steps)])
+    else:
+        # --- Use --no-mpi to bypass MPICH segfault under WSL ---
+        # PolyChord and MPICH together crash with signal 11 on WSL2 kernel 6.6.87.
+        # Running in serial (--no-mpi) is safer and avoids the MPI process tree complexity.
+        cobaya_cmd = [
+            python_executable, "-m", "cobaya", "run",
+            str(config_file),
+            "--packages-path", cobaya_packages_path,
+            run_flag,
+        ]
 
     # Ensure conda bin is first in PATH (for mpirun etc.), but do NOT override
     # LD_LIBRARY_PATH — prepending conda lib/ causes clik (Planck likelihood) to
     # SIGSEGV after loading. The conda Python binary already has the correct rpath.
     if conda_prefix and os.path.isdir(os.path.join(conda_prefix, "bin")):
         _run_env["PATH"] = os.path.join(conda_prefix, "bin") + os.pathsep + _run_env.get("PATH", "")
+    monitor_interval = "10" if state.is_optimizer else "150"
     monitor_cmd = [
         python_executable, "plot_chains.py",
         "--config", str(config_file),
         "--monitor-and-stop",
-        "--interval", "150",
+        "--interval", monitor_interval,
     ]
+    if state.is_optimizer:
+        monitor_cmd.append("--optimizer")
 
     try:
         state.current_status = "running"
@@ -4316,6 +4376,7 @@ async def start_run(config: RunConfig, request: Request = None):
         # Log the actual command for debugging
         log_dashboard_error(f"[START] Launched: {' '.join(cobaya_cmd)}", console=True)
 
+        # Launch the monitor process for all runs (standard MCMC or optimizer)
         state.monitor_process = subprocess.Popen(
             monitor_cmd,
             stdout=subprocess.PIPE,
@@ -4530,6 +4591,115 @@ async def get_logs(lines: int = 200):
         return {"lines": tail, "path": str(log_path), "total": len(all_lines)}
     except Exception as e:
         return {"lines": [], "path": str(log_path), "error": str(e)}
+
+def parse_multimodal_comparison(filepath: Path) -> dict:
+    if not filepath.exists():
+        return {"modes": [], "tensions": []}
+    try:
+        content = filepath.read_text()
+        modes = []
+        tensions = []
+        
+        parts = content.split("Mode: ")
+        for part in parts[1:]:
+            tension_part = None
+            if "Tension Metrics:" in part:
+                part, tension_part = part.split("Tension Metrics:", 1)
+                
+            lines = part.strip().split("\n")
+            mode_name = lines[0].strip()
+            
+            mode_data = {
+                "name": mode_name,
+                "chi2": None,
+                "penalized_chi2": None,
+                "viability_score": None,
+                "params": {},
+                "metrics": {},
+                "likes": {}
+            }
+            
+            section = None
+            for line in lines[1:]:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("---"):
+                    continue
+                if line.startswith("Total Chi2:"):
+                    mode_data["chi2"] = float(line.split("Total Chi2:")[1].strip())
+                    continue
+                if line.startswith("Raw Data Chi2:"):
+                    mode_data["chi2"] = float(line.split("Raw Data Chi2:")[1].strip())
+                    continue
+                if line.startswith("Penalized Chi2:"):
+                    mode_data["penalized_chi2"] = float(line.split("Penalized Chi2:")[1].strip())
+                    continue
+                if line.startswith("Viability Score:"):
+                    mode_data["viability_score"] = line.split("Viability Score:")[1].strip()
+                    continue
+                if line.startswith("Parameters:"):
+                    section = "params"
+                    continue
+                if line.startswith("Derived & Physical Metrics:"):
+                    section = "metrics"
+                    continue
+                if line.startswith("Likelihood Breakdown:"):
+                    section = "likes"
+                    continue
+                
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if section == "params":
+                        mode_data["params"][k] = v
+                    elif section == "metrics":
+                        mode_data["metrics"][k] = v
+                    elif section == "likes":
+                        mode_data["likes"][k] = v
+                        
+            modes.append(mode_data)
+            
+            if tension_part:
+                t_lines = tension_part.strip().split("\n")
+                for t_line in t_lines:
+                    t_line = t_line.strip()
+                    if not t_line:
+                        continue
+                    try:
+                        modes_str, param_val = t_line.split("|", 1)
+                        mode1, mode2 = modes_str.split("vs", 1)
+                        param, val = param_val.split(":", 1)
+                        tensions.append({
+                            "mode1": mode1.strip(),
+                            "mode2": mode2.strip(),
+                            "param": param.strip(),
+                            "value": float(val.strip())
+                        })
+                    except Exception:
+                        pass
+                        
+        return {"modes": modes, "tensions": tensions}
+    except Exception as e:
+        log_dashboard_error(f"Error parsing multimodal comparison: {e}")
+        return {"modes": [], "tensions": []}
+
+
+@app.get("/api/multimodal_comparison")
+async def get_multimodal_comparison():
+    """Returns parsed multimodal comparison data if available."""
+    prefix = getattr(state, "active_output_prefix", None)
+    if not prefix:
+        return {"status": "error", "message": "No active run"}
+    
+    comp_file = Path(f"{prefix}_modes_comparison.txt")
+    if not comp_file.exists():
+        return {"status": "error", "message": "Multimodal comparison report not found."}
+        
+    res = parse_multimodal_comparison(comp_file)
+    return {"status": "success", "modes": res["modes"], "tensions": res["tensions"]}
+
 
 @app.post("/api/watchdog")
 async def update_watchdog(report: WatchdogReport):
@@ -5724,6 +5894,16 @@ async def watchdog_restart(req: WatchdogRestartRequest, request: Request = None)
 
     asyncio.create_task(perform_restart())
     return {"message": "Watchdog-triggered restart initiated."}
+
+class WatchdogSettings(BaseModel):
+    auto_apply: bool
+
+@app.post("/api/settings/watchdog")
+async def update_watchdog_settings(settings: WatchdogSettings):
+    """Update automated watchdog prior widening & restart setting."""
+    state.auto_apply_watchdog = settings.auto_apply
+    log_dashboard_error(f"[SETTINGS] Watchdog automated actions set to {state.auto_apply_watchdog}", console=True)
+    return {"message": f"Watchdog auto-apply set to {state.auto_apply_watchdog}"}
 
 @app.post("/api/clear_watchdog_alerts")
 async def clear_watchdog_alerts():
