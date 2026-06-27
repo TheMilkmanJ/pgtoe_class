@@ -6,6 +6,15 @@ from typing import Optional, List
 from fastapi import HTTPException
 from parsers.logs import safe_parse_python_dict, get_best_fit_from_log
 
+def _assert_within_workspace(path: str, detail: str) -> None:
+    """Canonical workspace containment check using Path.resolve() and relative_to()."""
+    allowed_dir = Path(os.environ.get("DASHBOARD_WORKSPACE_ROOT", os.getcwd())).resolve()
+    abs_path = Path(path).resolve()
+    try:
+        abs_path.relative_to(allowed_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=detail)
+
 def get_output_prefix_from_yaml(config_path: str) -> str:
     """Parses the YAML file to find the 'output' key and sanitizes the path."""
     prefix = "chains/cobaya_run"
@@ -18,11 +27,7 @@ def get_output_prefix_from_yaml(config_path: str) -> str:
         pass
     
     # Sanitize prefix to prevent path traversal
-    abs_path = os.path.abspath(prefix)
-    allowed_dir = os.environ.get("DASHBOARD_WORKSPACE_ROOT") or os.path.abspath("/home/themilkmanj")
-    allowed_dir = os.path.abspath(allowed_dir)
-    if not abs_path.startswith(allowed_dir):
-        raise HTTPException(status_code=400, detail="Path traversal detected in YAML 'output' configuration.")
+    _assert_within_workspace(prefix, "Path traversal detected in YAML 'output' configuration.")
     return prefix
 
 def get_model_yaml_path(output_prefix: str, active_yaml_path: str = "") -> Optional[Path]:
@@ -223,11 +228,7 @@ def parse_polychord_stats(stats_file: Path, resume_file: Optional[Path] = None):
 def get_best_fit_details(output_prefix: str, state, active_yaml_path: str = ""):
     """Fixed, non-duplicated version of get_best_fit_details."""
     # Sanitize output_prefix to prevent directory traversal
-    abs_path = os.path.abspath(output_prefix)
-    allowed_dir = os.environ.get("DASHBOARD_WORKSPACE_ROOT") or os.path.abspath("/home/themilkmanj")
-    allowed_dir = os.path.abspath(allowed_dir)
-    if not abs_path.startswith(allowed_dir):
-        raise HTTPException(status_code=400, detail="Access denied: invalid output prefix path.")
+    _assert_within_workspace(output_prefix, "Access denied: invalid output prefix path.")
 
     log_file = Path(f"{output_prefix}.log")
     
@@ -298,18 +299,17 @@ def get_best_fit_details(output_prefix: str, state, active_yaml_path: str = ""):
             best_fit_this_file = current_best
             
             with open(fpath, 'r', errors='ignore') as f:
-                f.seek(raw_file_positions[fpath_str])
-                
-                # Check for header in final_file
+                # Check for header in final_file on every incremental read so
+                # appended rows still use the correct column mapping.
                 has_header = False
                 names_in_header = []
-                if ftype == "final" and raw_file_positions[fpath_str] == 0:
+                if ftype == "final":
+                    f.seek(0)
                     first_line = f.readline()
                     if first_line.startswith('#'):
                         has_header = True
                         names_in_header = first_line.lstrip('#').strip().split()
-                    else:
-                        f.seek(0)
+                f.seek(raw_file_positions[fpath_str])
                 
                 for line in f:
                     if line.strip().startswith('#'):

@@ -27,9 +27,9 @@ def test_health():
     data = response.json()
     assert "status" in data or "cpu_percent" in data
 
-def test_validate_config():
+def test_validate_config(tmp_path):
     # Use a minimal valid config
-    test_config = Path("tests/test_minimal.yaml")
+    test_config = tmp_path / "test_minimal.yaml"
     test_config.write_text("""
 output: chains/test
 likelihood:
@@ -48,7 +48,6 @@ sampler:
     assert response.status_code == 200
     data = response.json()
     assert data.get("valid") is True
-    test_config.unlink()
 
 def test_login_logout():
     # Login
