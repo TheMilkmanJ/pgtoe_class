@@ -217,15 +217,20 @@ def plot_optimizer_progress(output_prefix, config_path):
                     match = pattern.search(line)
                     if match:
                         try:
+                            s_val = match.group(1)
+                            s_val = re.sub(r'\binf\b', '1e10', s_val)
+                            s_val = re.sub(r'\bnan\b', '0.0', s_val)
+                            
                             # Read dict
-                            d = ast.literal_eval(match.group(1))
+                            d = ast.literal_eval(s_val)
                             # Calculate total chi2
                             cmb = d.get("chi2__CMB", 0.0)
                             bao = d.get("chi2__BAO", 0.0)
                             sn = d.get("chi2__SN", 0.0)
-                            tot = cmb + bao + sn
-                            if tot > 0:
-                                eval_idx += 1
+                            tot = (cmb or 0.0) + (bao or 0.0) + (sn or 0.0)
+                            
+                            eval_idx += 1
+                            if 0 < tot < 1e5:
                                 evals.append(eval_idx)
                                 chi2_vals.append(tot)
                         except Exception:

@@ -10,6 +10,8 @@ def safe_parse_python_dict(s: str) -> dict:
     s_clean = re.sub(r'\bTrue\b', 'true', s_clean)
     s_clean = re.sub(r'\bFalse\b', 'false', s_clean)
     s_clean = re.sub(r'\bNone\b', 'null', s_clean)
+    s_clean = re.sub(r'\binf\b', '1e10', s_clean)
+    s_clean = re.sub(r'\bnan\b', '0.0', s_clean)
     try:
         return json.loads(s_clean)
     except Exception as e:
