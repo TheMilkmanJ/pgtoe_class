@@ -417,6 +417,7 @@
                 <!-- Tab Headers -->
                 <div class="tabs-header" style="display: flex; gap: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 8px; margin-bottom: 15px; flex-wrap: wrap;">
                     <button class="tab-btn active" data-tab="tab-tension">Tension &amp; Compare</button>
+                    <button class="tab-btn" data-tab="tab-optimizer" id="tab-btn-optimizer" style="display: none; background: rgba(0, 210, 211, 0.15); border: 1px solid rgba(0, 210, 211, 0.3); color: #00d2d3;">⚡ Optimized Run</button>
                     <button class="tab-btn" data-tab="tab-curves">Cosmo Curves</button>
                     <button class="tab-btn" data-tab="tab-corner">Posterior Corner</button>
                     <button class="tab-btn" data-tab="tab-compare">Model Suite</button>
@@ -471,23 +472,9 @@
                         </div>
                     </div>
 
-                    <!-- Multimodal Modes Comparison Card (Cosmo Optimizer) -->
-                    <div class="evidence-math" id="multimodal-comparison-card" style="margin-top: 15px; position: relative; display: none;">
-                        <button class="copy-btn" id="btn-copy-multimodal" title="Copy multimodal comparison" style="position: absolute; top: 10px; right: 10px; background: none; border: none; color: #a4b0be; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; transition: all 0.2s ease;">📋</button>
-                        <div class="jeffreys-title"><span style="font-size: 1.2rem; margin-right: 5px;">🌌</span> Multimodal Modes Comparison</div>
-                        <div id="multimodal-comparison-body" style="font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; margin-top: 8px; overflow-x: auto;">
-                            <div style="color:#a4b0be">Run the Cosmo Optimizer with multistart to see Planck-preferred vs SH0ES-preferred modes compared.</div>
-                        </div>
-                    </div>
 
-                    <!-- Parameter Tension Analysis Card -->
-                    <div class="evidence-math" id="tension-analysis-card" style="margin-top: 15px; position: relative; display: none;">
-                        <button class="copy-btn" id="btn-copy-tension" title="Copy tension analysis" style="position: absolute; top: 10px; right: 10px; background: none; border: none; color: #a4b0be; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; transition: all 0.2s ease;">📋</button>
-                        <div class="jeffreys-title"><span style="font-size: 1.2rem; margin-right: 5px;">⚡</span> Mode Tension Analysis (Planck vs. SH0ES)</div>
-                        <div id="tension-analysis-body" style="font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; margin-top: 8px; overflow-x: auto;">
-                            <div style="color:#a4b0be">Run multi-start optimization to see parameter tension resolved.</div>
-                        </div>
-                    </div>
+                    <!-- Multimodal cards moved to the dedicated Optimized Run tab -->
+
 
                     <!-- Profile Likelihood Plot Card -->
                     <div class="evidence-math" id="profile-likelihood-card" style="margin-top: 15px; position: relative; display: none;">
@@ -618,6 +605,36 @@
                     <button class="btn btn-secondary" id="btn-copy-all-ai-prompts" style="margin-top: 10px; width: 100%; padding: 10px; font-size: 0.9rem; background: linear-gradient(135deg, #10ac84, #00d2d3); border: none; box-shadow: 0 4px 15px rgba(16, 172, 132, 0.3); font-weight: bold;">
                         📋 Copy ALL AI Prompts (Diagnostic + Stacking + Savage + Paper + Full Context)
                     </button>
+                </div>
+
+                <!-- Tab 1.5: Optimized Run Tracker -->
+                <div class="tab-content" id="tab-optimizer">
+                    <!-- Real-time Convergence Plot -->
+                    <div class="evidence-math" style="position: relative;">
+                        <div class="jeffreys-title"><span style="font-size: 1.2rem; margin-right: 5px;">📈</span> Optimizer Convergence Progress</div>
+                        <div style="text-align: center; margin-top: 10px;">
+                            <img id="optimizer-plot-img" src="/api/posteriors_plot?t=0" style="max-width: 100%; height: auto; border-radius: 8px; border: 1px solid rgba(255,255,255,0.08); background: #000;" onerror="this.style.display='none'; document.getElementById('optimizer-plot-fallback').style.display='block';" onload="document.getElementById('optimizer-plot-fallback').style.display='none';" />
+                            <div id="optimizer-plot-fallback" style="padding: 40px; color: #a4b0be; font-size: 0.85rem;">Convergence plot will appear once the first evaluations are computed.</div>
+                        </div>
+                    </div>
+
+                    <!-- Multimodal Modes Comparison Card (Cosmo Optimizer) -->
+                    <div class="evidence-math" id="multimodal-comparison-card" style="margin-top: 15px; position: relative;">
+                        <button class="copy-btn" id="btn-copy-multimodal" title="Copy multimodal comparison" style="position: absolute; top: 10px; right: 10px; background: none; border: none; color: #a4b0be; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; transition: all 0.2s ease;">📋</button>
+                        <div class="jeffreys-title"><span style="font-size: 1.2rem; margin-right: 5px;">🌌</span> Multimodal Modes Comparison</div>
+                        <div id="multimodal-comparison-body" style="font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; margin-top: 8px; overflow-x: auto;">
+                            <div style="color:#a4b0be">Run the Cosmo Optimizer with multistart to see Planck-preferred vs SH0ES-preferred modes compared.</div>
+                        </div>
+                    </div>
+
+                    <!-- Parameter Tension Analysis Card -->
+                    <div class="evidence-math" id="tension-analysis-card" style="margin-top: 15px; position: relative;">
+                        <button class="copy-btn" id="btn-copy-tension" title="Copy tension analysis" style="position: absolute; top: 10px; right: 10px; background: none; border: none; color: #a4b0be; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; border-radius: 4px; transition: all 0.2s ease;">📋</button>
+                        <div class="jeffreys-title"><span style="font-size: 1.2rem; margin-right: 5px;">⚡</span> Mode Tension Analysis (Planck vs. SH0ES)</div>
+                        <div id="tension-analysis-body" style="font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.45; margin-top: 8px; overflow-x: auto;">
+                            <div style="color:#a4b0be">Run multi-start optimization to see parameter tension resolved.</div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- Tab 2: Cosmo Curves -->

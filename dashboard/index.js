@@ -1815,10 +1815,29 @@ async function checkStatus() {
             updateToggleUI();
         }
         
+        // Show/hide Optimizer tab button dynamically
+        const optBtn = document.getElementById('tab-btn-optimizer');
+        if (optBtn) {
+            if (data.is_optimizer) {
+                optBtn.style.display = 'block';
+            } else {
+                optBtn.style.display = 'none';
+            }
+        }
+
         // Refresh drool-worthy derived params when we have new best-fit info
         if (data.best_raw_params || data.best_chi2 !== null || data.log_evidence !== null || data.status === 'running' || data.status === 'completed') {
             refreshDerivedParameters();
             fetchMultimodalComparison();
+            
+            // Refresh optimizer real-time convergence plot
+            if (data.is_optimizer) {
+                const optImg = document.getElementById('optimizer-plot-img');
+                if (optImg) {
+                    optImg.src = `${API_URL}/api/posteriors_plot?t=${Date.now()}`;
+                    optImg.style.display = 'block';
+                }
+            }
         }
         
         // Update Phone Sync link
