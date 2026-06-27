@@ -37,6 +37,12 @@ python3 run_optimizer.py --test-toy --multistart 2 --mcmc-steps 20
 ```
 This runs a 4D multimodal test likelihood in seconds and outputs full diagnostics.
 
+### ⚠️ Statistical Disclaimer: Gelfand-Dey Evidence Approximation
+The Hybrid Cosmo Optimizer uses the **Gelfand-Dey (GD) importance sampling estimator** to calculate the local Bayesian evidence $\ln(Z_k)$ for each identified mode. While GD is highly efficient and enables real-time evidence feedback from local MCMC chains, users must note:
+* **Normality Assumption:** GD relies on a multivariate Gaussian proposal density $f(\theta)$ constructed from the MCMC sample covariance. For highly non-Gaussian, curved, or degenerate parameter regions, the estimator's variance can become large.
+* **MCMC Sample Density:** The accuracy of the GD estimate is highly sensitive to the convergence and density of the MCMC chain. A minimum of 100–200 post-burn-in samples per mode is recommended for stable evidence estimation.
+* **Reviewer Guidelines:** For final, publication-grade model selection claims (especially when reporting significant evidence for new physics or tension resolution), you should run a full **Nested Sampling** run (e.g., using the PolyChord sampler in the dashboard) to validate the approximate GD evidence.
+
 See the detailed Quick Start section below for manual Docker options and more.
 
 ### Core Idea
