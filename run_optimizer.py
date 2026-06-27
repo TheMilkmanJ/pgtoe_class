@@ -170,7 +170,75 @@ def run_mcmc(best_x, cov, target_func, model, sampled_names, derived_names, num_
             print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [mcmc] Step {step + 1}/{num_steps} | Acceptance Rate: {acc_rate:.1f}% | Current Chi2: {chi2_curr:.4f}")
             sys.stdout.flush()
             
-    return chain
+def estimate_gelfand_dey_evidence(mcmc_chain, sampled_names, info):
+    if not mcmc_chain or len(mcmc_chain) < 20:
+        return None
+        
+    # Extract parameter vectors, log-likelihoods, and log-priors
+    n_params = len(sampled_names)
+    points = []
+    loglikes = []
+    logpriors = []
+    
+    for row in mcmc_chain:
+        points.append([row["point"][name] for name in sampled_names])
+        # total_loglike is log(L)
+        loglikes.append(row["total_loglike"])
+        logpriors.append(row["logprior"])
+        
+    points = np.array(points)
+    loglikes = np.array(loglikes)
+    logpriors = np.array(logpriors)
+    
+    # Compute mean and covariance of MCMC points
+    mean = np.mean(points, axis=0)
+    cov = np.cov(points, rowvar=False)
+    
+    # Regularize covariance if it is singular or nearly singular
+    if n_params == 1:
+        cov = np.array([[cov]])
+    cov += np.eye(n_params) * 1e-6 * np.diag(cov)
+    
+    try:
+        inv_cov = np.linalg.inv(cov)
+        sign, logdet = np.linalg.slogdet(cov)
+        if sign <= 0:
+            return None
+    except np.linalg.LinAlgError:
+        return None
+        
+    # Define truncation threshold (90% quantile of chi2 with n_params degrees of freedom)
+    from scipy.stats import chi2
+    threshold = chi2.ppf(0.90, df=n_params)
+    
+    valid_weights = []
+    
+    for idx, pt in enumerate(points):
+        diff = pt - mean
+        mahalanobis = diff.dot(inv_cov).dot(diff)
+        
+        # Truncate to the 90% high-density region to ensure f(theta) has thinner tails than posterior
+        if mahalanobis <= threshold:
+            # log of multivariate Gaussian density f(theta)
+            l_f = -0.5 * n_params * np.log(2.0 * np.pi) - 0.5 * logdet - 0.5 * mahalanobis
+            # Gelfand-Dey weight in log space: ln(f) - ln(L) - ln(pi)
+            w = l_f - loglikes[idx] - logpriors[idx]
+            valid_weights.append(w)
+            
+    if len(valid_weights) < 10:
+        return None
+        
+    # Use log-sum-exp trick for stability
+    valid_weights = np.array(valid_weights)
+    max_w = np.max(valid_weights)
+    sum_exp = np.sum(np.exp(valid_weights - max_w))
+    
+    # ln(0.90 / Z) = -ln(M) + max_w + ln(sum(exp(w - max_w)))
+    # So ln(Z) = ln(0.90) + ln(M) - max_w - ln(sum(exp(w - max_w)))
+    m_samples = len(points)
+    log_z = np.log(0.90) + np.log(m_samples) - max_w - np.log(sum_exp)
+    
+    return float(log_z)
 
 def main():
     config_path = os.path.abspath(args.config_file)
@@ -1025,6 +1093,15 @@ def main():
     if args.mcmc_steps > 0:
         try:
             mcmc_chain = run_mcmc(best_x, cov, target_function, model, sampled_names, derived_names, args.mcmc_steps)
+            
+            # Estimate Gelfand-Dey evidence from the MCMC chain
+            log_z_gd = estimate_gelfand_dey_evidence(mcmc_chain, sampled_names, info)
+            if log_z_gd is not None:
+                print(f" [mcmc] Estimated Gelfand-Dey Bayesian Evidence ln(Z) = {log_z_gd:.4f}")
+                log_z_laplace = log_z_gd  # Override Laplace evidence with the more robust MCMC-based estimate!
+            else:
+                print(f" [mcmc] Warning: could not estimate Gelfand-Dey evidence (insufficient samples or singular covariance).")
+            sys.stdout.flush()
         except Exception as e:
             print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [mcmc] Warning: MCMC run failed: {e}")
             sys.stdout.flush()
