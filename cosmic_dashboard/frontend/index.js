@@ -150,7 +150,7 @@ let isAutoRunning = false; // Flag to track and prevent duplicate auto-run trigg
 let watchdogIgnored = false; // Flag to temporarily ignore watchdog
 let lastRunStartTime = null; // Track run start time to persist ignore state across refreshes
 let lastWatchdogAlertCount = 0; // Track watchdog alert count for audio alerts
-let autoWatchdogEnabled = true;
+let autoWatchdogEnabled = false;
 
 function updateToggleUI() {
     const toggle = document.getElementById('toggle-auto-watchdog');
@@ -4635,7 +4635,7 @@ async function handleSamplerRecovery(widenPercent = 0.20, proposalScale = 2.0) {
     if (btn) btn.disabled = true;
     if (btnStag) btnStag.disabled = true;
     
-    const applyWatchdog = document.getElementById('chk-apply-watchdog')?.checked ?? true;
+    const applyWatchdog = document.getElementById('chk-apply-watchdog')?.checked ?? false;
     const watchdogMsg = applyWatchdog ? " (with Watchdog recommendations)" : " (manual widening only)";
     appendLog(`[PIPELINE] Sending sampler recovery request. Priors widening by 20%, proposal scale widening by 2x${watchdogMsg}...`);
     try {
