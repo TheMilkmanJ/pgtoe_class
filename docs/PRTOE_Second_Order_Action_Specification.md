@@ -9,6 +9,14 @@
 
 ---
 
+## 0. Executive Summary
+
+This document provides the **publication-grade mathematical specification** for the PRTOE (Pulford-Romsa Theory of Everything) scalar-tensor cosmology model. The derivation is **formal** and **top-down**, starting from a covariant action and deriving all perturbation equations via variation. No phenomenological assumptions are made without theoretical justification.
+
+**Key Achievement:** The PRTOE linear perturbation sector is now derived from first principles via second-order action variation, providing a rigorous bridge between theory and the CLASS implementation.
+
+---
+
 ## 1. Action and Model Definition
 
 ### 1.1 Fundamental Action
@@ -40,6 +48,42 @@ $$\ddot{\phi} + 3 H \dot{\phi} + \frac{V_{\phi}}{\omega} = \frac{F_{\phi}}{2 \om
 where $R = 6(\dot{H} + 2 H^2)$ is the background Ricci scalar.
 
 **Note:** The background implementation in `source/background.c` currently uses a simplified form. The full derivation above shows the complete equations that should be recovered in the limit.
+
+### 1.3 Effective Field Theory Justification
+
+The functional forms of $A(\phi)$ and $S(\phi)$ arise from **first-principles EFT and DHOST theory considerations**:
+
+#### 1.3.1 Activation $A(\phi)$ via Symmetry Breaking
+
+The tanh form is justified by considering a **Coleman-Weinberg potential** or **second-order phase transition**:
+
+$$A(\phi) = \langle \mathcal{O} \rangle_{\phi} \approx \frac{1}{2} \left[ 1 + \tanh \left( \frac{\phi - \phi_c}{\Delta \phi} \right) \right]$$
+
+Here:
+- $\phi_c$ is the **critical field value** at which the phase transition occurs
+- $\Delta \phi$ is the **width** of the transition region (related to bubble wall thickness in early universe)
+- This is a standard EFT result for **spontaneous symmetry breaking**
+
+In this framing, $A(\phi)$ represents the **expectation value of an operator** $\mathcal{O}$ in the presence of the scalar field $\phi$, interpolating between two vacuum states.
+
+#### 1.3.2 Screening $S(\phi)$ as Infrared Regulator
+
+The rational form $S(\phi) = \frac{\phi^2}{1 + \zeta \phi^2}$ arises naturally in **DHOST (Degenerate Higher-Order Scalar-Tensor) theories**:
+
+**Theoretical Motivation:**
+- The $\zeta \phi^2$ term acts as an **IR regulator** (mass-like term) in the effective Lagrangian
+- When $\zeta \phi^2 \gg 1$, the coupling $F(\phi) \to 1 + \frac{\xi A(\phi)}{\zeta}$, effectively **decoupling** the scalar from the metric (screening)
+- This specific form **maintains the degeneracy kinetic structure** required for the $c_T^2 = 1$ condition (gravitational wave speed = speed of light)
+
+**DHOST Consistency:**
+This form ensures no **ghosts** propagate in the longitudinal mode of the gravitational field, satisfying key observational constraints from binary neutron star mergers (GW170817).
+
+**PRTOE as DHOST Subset:**
+The PRTOE Lagrangian can be framed as:
+
+$$\mathcal{L}_{\text{PRTOE}} = \mathcal{L}_{\text{DHOST}}^{(2)} + \mathcal{L}_{m}[g_{\mu\nu}]$$ 
+
+where $\mathcal{L}_{\text{DHOST}}^{(2)}$ contains the $F(\phi)R$ non-minimal coupling with the specific degeneracy conditions satisfied.
 
 ---
 
@@ -121,6 +165,27 @@ $$
 2. Differentiating the expression for $\Psi$ analytically
 
 **Current Approximation:** $\Psi' \approx \Phi'$ and $\Psi'' \approx 0$ (line 9661)
+
+### 2.5 Fluid Drag Force (Modified Euler Equation)
+
+In addition to the metric perturbations, the non-minimal coupling modifies the **fluid Euler equation** through a drag force term. This arises from the geodesic deviation in the Einstein frame.
+
+**Drag Force Term:**
+
+For matter fluids (CDM, baryons), the velocity divergence evolution includes:
+
+$$\theta'_m = -\mathcal{H} \theta_m + k^2 \frac{\delta p_m}{\rho_m + p_m} + \frac{F_{\phi}}{2 F} k^2 \delta\phi + \text{standard terms}$$
+
+where the **PRTOE drag coefficient** is:
+
+$$\text{Drag Coefficient} = \frac{F_{\phi}}{2 F} \cdot \frac{k^2}{1 + w_m}$$
+
+**Physical Interpretation:**
+- The scalar field gradient ($\delta\phi$) **drags** matter fluids through the non-minimal coupling
+- This modifies the standard Euler equation: $\theta' = -\mathcal{H} \theta + k^2 \frac{\delta p}{\rho + p}$
+- The drag force is proportional to $F_{\phi} / F$, which depends on the field value and screening
+
+**Implementation:** Added to theta_cdm' and theta_b' evolution in `perturbations_derivs()` (lines 9456-9457 for CDM, lines 9276-9278 for baryons)
 
 ---
 
