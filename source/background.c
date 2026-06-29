@@ -540,30 +540,48 @@ int background_functions(
     double A_prime = sech2_u / (2.0 * pba->delta_phi_prtoe);
     double A_primeprime = -sech2_u * tanh_u / (pba->delta_phi_prtoe * pba->delta_phi_prtoe);
 
+    /* Use effective screened coupling for consistency */
+    double xi_eff = get_xi_eff(pba, phi);
+    
+    /* Compute xi_eff derivatives with respect to phi */
     double phi2 = phi * phi;
     double denom = 1.0 + pba->zeta_prtoe * phi2;
-    double S = phi2 / denom;
-    double S_prime = 2.0 * phi / (denom * denom);
-    double S_primeprime = (2.0 - 6.0 * pba->zeta_prtoe * phi2) / (denom * denom * denom);
+    double xi_eff_phi = pba->prtoe_xi * 2.0 * phi / (denom * denom);
+    double xi_eff_phiphi = pba->prtoe_xi * 2.0 * (1.0 - pba->zeta_prtoe * phi2) / (denom * denom * denom);
+    
+    /* Activation function and derivatives */
+    double f = A;
+    double f_prime = A_prime;
+    double f_primeprime = A_primeprime;
 
-    double f = A * S;
-    double f_prime = A_prime * S + A * S_prime;
-    double f_primeprime = A_primeprime * S + 2.0 * A_prime * S_prime + A * S_primeprime;
-
-    double F = 1.0 + pba->xi_prtoe * f;
-    double F_phi = pba->xi_prtoe * f_prime;
-    double F_phiphi = pba->xi_prtoe * f_primeprime;
+    /* Coupling F = 1 + xi_eff * f, accounting for xi_eff(phi) dependence */
+    double F = 1.0 + xi_eff * f;
+    double F_phi = xi_eff_phi * f + xi_eff * f_prime;
+    double F_phiphi = xi_eff_phiphi * f + 2.0 * xi_eff_phi * f_prime + xi_eff * f_primeprime;
 
     pvecback[pba->index_bg_F_prtoe]       = F;
     pvecback[pba->index_bg_F_phi_prtoe]   = F_phi;
     pvecback[pba->index_bg_F_phiphi_prtoe] = F_phiphi;
 
-    /* === Early-time suppression for BBN safety ===
-     * PRTOE field is frozen until a > a_activation to avoid BBN issues
+    /* === Covariant activation based on physical quantities ===
+     * Instead of using scale factor a, we use the scalar field energy density
+     * relative to radiation density for a covariant activation criterion.
+     * This ensures the transition happens at the same physical conditions
+     * regardless of parameterization.
      */
-    double a_activation = 0.01;  // Activate at z ~ 99
-    double width_trans = 0.5;   // Transition width in log(a)
-    double x_trans = (log(MAX(a, 1e-10)) - log(a_activation)) / width_trans;
+    double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
+    double rho_r = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0) + pvecback[pba->index_bg_rho_nu];
+    
+    /* Activate when scalar field energy density exceeds a fraction of radiation density
+     * This is covariant and happens at the same physical epoch regardless of 
+     * how we parameterize the model.
+     */
+    double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
+    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
+    
+    /* Smooth transition */
+    double width_trans = 0.1;  // Width in log(ratio)
+    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
     double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
 
     /* Pre-compute rho_prtoe and p_prtoe for Friedmann equation */
@@ -638,7 +656,7 @@ int background_functions(
     pvecback[pba->index_bg_rho_lambda] = pba->Omega0_lambda * pow(pba->H0,2);
     /* Don't add Lambda to rho_tot when PRTOE is active with non-negligible xi
      * For null limit testing, we allow Lambda to be present when xi is very small */
-    if (pba->use_prtoe == _FALSE_ || pba->xi_prtoe < 1e-8) {
+    if (prtoe_is_physically_active(pba) == _FALSE_) {
       rho_tot += pvecback[pba->index_bg_rho_lambda];
       p_tot -= pvecback[pba->index_bg_rho_lambda];
     }
@@ -740,12 +758,15 @@ int background_functions(
     /* Get H value (now computed by Friedmann equation) */
     double H = pvecback[pba->index_bg_H];
 
-    /* === Early-time suppression for BBN safety ===
-     * PRTOE field is frozen until a > a_activation to avoid BBN issues
+    /* === Covariant activation (must match first PRTOE block) ===
+     * Recompute using the same physical criterion for consistency
      */
-    double a_activation = 0.01;  // Activate at z ~ 99
-    double width_trans = 0.5;   // Transition width in log(a)
-    double x_trans = (log(MAX(a, 1e-10)) - log(a_activation)) / width_trans;
+    double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
+    double rho_r = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0) + pvecback[pba->index_bg_rho_nu];
+    double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
+    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
+    double width_trans = 0.1;  // Width in log(ratio)
+    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
     double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
 
     if (trans > 0.5) {
@@ -3001,19 +3022,20 @@ int background_derivs(
     double phi = y[pba->index_bi_phi_prtoe];
     double dphi = y[pba->index_bi_dphi_prtoe];
 
-    /* Early-time suppression for BBN safety - same as in background_functions */
-    double a_activation = 0.01;  // Activate at z ~ 99
-    double width_trans = 0.5;   // Transition width in log(a)
-    double x_trans = (log(MAX(a, 1e-10)) - log(a_activation)) / width_trans;
+    /* Covariant activation - same as in background_functions */
+    double phi_dot = dphi / a;
+    double V = pba->V0_prtoe * exp(-pba->lambda_prtoe * phi) + 0.5 * pba->m_prtoe * pba->m_prtoe * phi * phi;
+    double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
+    double rho_r = y[pba->index_bi_rho_g] + (pba->has_ur ? y[pba->index_bi_rho_ur] : 0.0) + y[pba->index_bi_rho_nu];
+    double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
+    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
+    double width_trans = 0.1;  // Width in log(ratio)
+    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
     double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
 
-    /* Screening factor (applied to the triplet) */
-    double screening_factor = 1.0 / (1.0 + pba->zeta_prtoe * phi * phi);
-
-    /* Currently only the ξ R term is active at background level.
-       alpha_prtoe / beta_prtoe / delta_prteo are screened but their
-       full DHOST contributions are not yet reduced here. */
-    double xi_screened = pba->xi_prtoe * screening_factor * trans;
+    /* Use effective screened coupling with transition */
+    double xi_eff = get_xi_eff(pba, phi);
+    double xi_screened = xi_eff * trans;
 
     /* Potential derivative */
     double m2 = pba->m_prtoe * pba->m_prtoe;
@@ -3319,7 +3341,8 @@ double dV_scf(struct background *pba, double phi) {
   }
   double dV_exp = -pba->lambda_prtoe * pba->V0_prtoe * exp(-pba->lambda_prtoe * phi);
   double H_floor_internal = pba->H_vac_floor / 299792.458;
-  return dV_exp + 3.0 * pow(H_floor_internal, 2) * pba->xi_prtoe;
+  double xi_eff = get_xi_eff(pba, phi);
+  return dV_exp + 3.0 * pow(H_floor_internal, 2) * xi_eff;
 }
 
 double ddV_scf(struct background *pba, double phi) {

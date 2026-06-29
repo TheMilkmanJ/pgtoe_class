@@ -685,6 +685,15 @@ extern "C" {
 
 //@}
 
+/** Returns the effective coupling xi_eff(phi) with screening */
+static inline double get_xi_eff(struct background *pba, double phi) {
+    // Screening function S(phi) = phi^2 / (1 + zeta * phi^2)
+    double phi2 = phi * phi;
+    double denom = 1.0 + pba->zeta_prtoe * phi2;
+    double S_phi = phi2 / denom;
+    return pba->prtoe_xi * S_phi;
+}
+
 /** Returns _TRUE_ only if PRTOE is physically active (not in null limit) */
 static inline int prtoe_is_physically_active(struct background *pba) {
     // 1. Hard gate: if user didn't ask for PRTOE, it is not active.
