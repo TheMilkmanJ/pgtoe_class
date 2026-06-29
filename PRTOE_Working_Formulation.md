@@ -513,7 +513,7 @@ The fastest path forward is:
 
 ## Appendix A: Explicit Perturbation Equations (Tasks 8-15)
 
-### A.1 Task 8: Explicit delta_phi Perturbation Equation ✅
+### A.1 Task 8: Explicit delta_phi Perturbation Equation
 
 **Gauge:** Newtonian gauge  
 **Metric:** ds² = a²[-(1+2Ψ)dτ² + (1-2Φ)dx²]  
@@ -552,11 +552,9 @@ Where source term S_φ includes metric perturbation couplings:
 S_φ = - (1/2) φ₀' (Ψ' + 3 Φ') + (1/2) a² ∇² (φ₀' (Ψ - Φ))
 ```
 
-**Status:** ✅ **EXPLICIT EQUATION WRITTEN**
-
 ---
 
-### A.2 Task 9: Explicit delta_R Expression ✅
+### A.2 Task 9: Explicit delta_R Expression
 
 **Linearized Ricci scalar in Newtonian gauge:**
 
@@ -588,11 +586,9 @@ For ΛCDM background (R_{00} = -3 a² H², R_{ii} = a⁴ (2 dot{H} + 4 H²)):
 δR = -6 a⁻² [ Ψ'' + 4 aH Ψ' + (a''/a + 2 aH²) Φ + (1/3) k² (Ψ - Φ) ]
 ```
 
-**Status:** ✅ **EXPLICIT EXPRESSION WRITTEN**
-
 ---
 
-### A.3 Task 10: Explicit 00, 0i, ij Einstein Equations ✅
+### A.3 Task 10: Explicit 00, 0i, ij Einstein Equations
 
 **Conventions:**
 - Newtonian gauge: Ψ (lapse), Φ (curvature)
@@ -628,11 +624,9 @@ k² (Ψ' + aH Φ) = 4πG a² (ρ + p) θ_total
 (k² + 2 aH ∂_τ) (Ψ - Φ) = 4πG a² Π_total
 ```
 
-**Status:** ✅ **ALL EXPLICIT EQUATIONS WRITTEN**
-
 ---
 
-### A.4 Task 11: Explicit Gravitational Slip Formula ✅
+### A.4 Task 11: Explicit Gravitational Slip Formula
 
 **Definition:** η(τ, k) = Ψ(τ, k) - Φ(τ, k)
 
@@ -663,11 +657,9 @@ Where Π_PRTOE includes contributions from:
 
 **Null-limit check:** As xi → 0, Π_PRTOE → 0, so η → 0 (recovers ΛCDM)
 
-**Status:** ✅ **EXPLICIT FORMULA DERIVED**
-
 ---
 
-### A.5 Task 12: Bianchi Identity / Stress-Energy Conservation Check ✅
+### A.5 Task 12: Bianchi Identity / Stress-Energy Conservation Check
 
 **Bianchi Identity:** ∇^μ G_{μν} = 0  (always true by construction)
 
@@ -698,11 +690,9 @@ The Bianchi identity ensures that the perturbation equations are consistent with
 1. **Background:** Check that ∂_τ ρ_total + 3 H (ρ + p) = 0 holds
 2. **Perturbations:** Verify ∂_τ δρ_total + 3 aH (δρ_total + δp_total) + (ρ + p) (θ_total + 3 Φ') = 0
 
-**Status:** ✅ **BIANCHI IDENTITY VERIFICATION FRAMEWORK ESTABLISHED**
-
 ---
 
-### A.6 Task 13: Perturbation Initial Conditions ✅
+### A.6 Task 13: Perturbation Initial Conditions
 
 **Initial conditions set in radiation domination (τ_i ≪ τ_eq)**
 
@@ -732,11 +722,9 @@ Where:
 ζ(τ_i, k) = Ψ(τ_i, k)  (for adiabatic initial conditions)
 ```
 
-**Status:** ✅ **INITIAL CONDITIONS DEFINED**
-
 ---
 
-### A.7 Task 14: Null-Limit Recovery of CLASS Results ✅
+### A.7 Task 14: Null-Limit Recovery of CLASS Results
 
 **Null limit:** xi_prtoe → 0, zeta_prtoe → 0, V0_prtoe → 0
 
@@ -770,11 +758,9 @@ C_ℓ^PRTOE → C_ℓ^ΛCDM as xi, zeta, V0 → 0
 - Compare C_ℓ output to standard ΛCDM
 - Verify agreement to < 0.1%
 
-**Status:** ✅ **NULL-LIMIT RECOVERY FRAMEWORK ESTABLISHED**
-
 ---
 
-### A.8 Task 15: Numerical Stability Conditions ✅
+### A.8 Task 15: Numerical Stability Conditions
 
 #### Ghost Instability Condition:
 ```
@@ -828,8 +814,6 @@ To avoid non-linear regime:
 ```
 |δφ| / |φ₀| < 0.1  (conservative)
 ```
-
-**Status:** ✅ **NUMERICAL STABILITY CONDITIONS DOCUMENTED**
 
 ---
 
