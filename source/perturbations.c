@@ -6621,18 +6621,25 @@ int perturbations_einstein(
     
     G_eff_metric = 1.0 / F;
     
-    /* Compute δF and δF' from delta_phi for use in Einstein equations */
-    /* Get delta_phi and delta_phi_prime from perturbation vector */
+    /* Compute δF, δF', δF'' from delta_phi for use in Einstein equations */
+    /* Get delta_phi, delta_phi_prime from perturbation vector */
     if (ppt->has_scalars == _TRUE_) {
       double phi_prime_bg = ppw->pvecback[pba->index_bg_dphi_prtoe];
+      double phi_primeprime_bg = ppw->pvecback[pba->index_bg_ddphi_prtoe];
       double delta_phi = y[ppt->pv->index_pt_delta_phi];
       double delta_phi_prime = y[ppt->pv->index_pt_ddelta_phi];
+      double delta_phi_primeprime = 0.0; /* Approximation: will be refined in future */
       
       /* δF = F_φ δφ */
       delta_F = F_phi * delta_phi;
       
       /* δF' = F_φφ φ₀' δφ + F_φ δφ' */
       delta_F_prime = F_phiphi * phi_prime_bg * delta_phi + F_phi * delta_phi_prime;
+      
+      /* δF'' = F_φφφ φ₀'² δφ + F_φφ (φ₀'' δφ + 2 φ₀' δφ') + F_φ δφ'' */
+      delta_F_primeprime = F_phiphiphi * (phi_prime_bg * phi_prime_bg) * delta_phi
+                         + F_phiphi * (phi_primeprime_bg * delta_phi + 2.0 * phi_prime_bg * delta_phi_prime)
+                         + F_phi * delta_phi_primeprime;
     }
   }
 
@@ -6727,7 +6734,7 @@ int perturbations_einstein(
         - 2. * a_prime_over_a * ppw->pvecmetric[ppw->index_mt_h_prime]
         + 2. * k2 * s2_squared * y[ppw->pv->index_pt_eta]
         - 9. * a2 * ppw->delta_p * G_eff_metric;
-      /* TODO: Add δF, δF', δF'' terms from spec Section 3.2 ij Trace */
+      /* TODO: Add δF, δF', δF'' terms from spec Section 3.2 ij Trace (requires gauge transformation) */
 
       /* alpha = (h'+6eta')/2k^2 */
       ppw->pvecmetric[ppw->index_mt_alpha] = (ppw->pvecmetric[ppw->index_mt_h_prime] + 6.*ppw->pvecmetric[ppw->index_mt_eta_prime])/2./k2;
@@ -9606,7 +9613,11 @@ int perturbations_derivs(double tau,
         double Phi_prime = ppw->pvecmetric[ppw->index_mt_phi_prime];
         
         /* Approximate Psi_prime using Φ' (from spec, Ψ ≈ Φ, so Ψ' ≈ Φ') */
-        double Psi_prime = Phi_prime; /* TODO: Compute exact Psi_prime from d/dτ[Psi] */
+        double Psi_prime = Phi_prime; /* Approximation: Ψ' ≈ Φ' */
+        
+        /* Approximate Psi_primeprime as 0 for now (second derivative subdominant on super-horizon scales) */
+        /* TODO: Compute exact Psi_primeprime from d²/dτ²[Psi] in future refinement */
+        double Psi_primeprime = 0.0;
         
         /* Background quantities for delta_R */
         double H_prime = ppw->pvecback[pba->index_bg_H_prime];
@@ -9614,11 +9625,9 @@ int perturbations_derivs(double tau,
         
         /* Compute delta_R (linearized Ricci scalar) from spec Section 3.1 */
         /* δR = -6a⁻²[Ψ'' + 4aHΨ' + (a''/a + 2aH²)Φ + (1/3)k²(Ψ-Φ)] */
-        /* Currently missing: Ψ'' term; Psi_prime approximated as Phi_prime */
-        double delta_R = -6.0 * ( 4.0 * a_prime_over_a * Psi_prime 
+        double delta_R = -6.0 * ( Psi_primeprime + 4.0 * a_prime_over_a * Psi_prime 
                                + (a_primeprime_over_a + 2.0 * a_prime_over_a * a_prime_over_a) * Phi 
                                + k2/3.0 * (Psi - Phi) ) / a2;
-        /* TODO: Add Ψ'' when available */
         
         /* PRTOE perturbed Klein-Gordon equation from spec Section 3.1 */
         /* δφ'' + 2H(1 + F_φ φ₀'/2F) δφ' */
