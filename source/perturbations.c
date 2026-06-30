@@ -3999,6 +3999,15 @@ int perturbations_vector_init(
       class_define_index(ppv->index_pt_dPhi_prtoe, _TRUE_, index_pt, 1);
       class_define_index(ppv->index_pt_eta_prtoe, _TRUE_, index_pt, 1);
       class_define_index(ppv->index_pt_deta_prtoe, _TRUE_, index_pt, 1);
+
+      /* --- Alias SCF indices to PRTOE perturbations for fluent integration ---
+         This maps existing scalar-field handling to PRTOE variables so most
+         DE-related codepaths operate on PRTOE when active, reducing scattered guards.
+         Aliases are done only when PRTOE is active; when inactive, scf indices
+         remain controlled by has_scf and previous behavior.
+      */
+      ppv->index_pt_phi_scf = ppv->index_pt_delta_prtoe;
+      ppv->index_pt_phi_prime_scf = ppv->index_pt_ddelta_prtoe;
     } else {
       ppv->index_pt_delta_phi = -1;
       ppv->index_pt_ddelta_phi = -1;
