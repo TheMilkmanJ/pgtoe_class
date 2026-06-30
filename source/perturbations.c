@@ -9025,12 +9025,10 @@ int prtoe_perturbations_derivs(
   /* PRTOE is only active when meaningfully configured */
   if (pba->de_mode == prtoe_active) {
 
-    /* ==== Diagnostic Hook ==== */
-    /* Check for stiffness in PRTOE perturbations */
-    if (fabs(y[ppw->pv->index_pt_ddelta_prtoe]) > 1e10) {
-      printf("STIFFNESS ALERT: k=%e, tau=%e, ddelta_phi=%e, delta_phi=%e\n", 
-             k, tau, y[ppw->pv->index_pt_ddelta_prtoe], y[ppw->pv->index_pt_delta_prtoe]);
-    }
+    /* === SIMPLIFIED: Only evolve field perturbations (δφ, δφ') ===
+       Metric potentials (Φ, η) are determined from constraints in metric_sources()
+       not evolved here. This prevents singular Jacobian from over-determined system.
+    */
 
     /* Load PRTOE background quantities */
     double phi        = pvecback[pba->index_bg_phi_prtoe];
@@ -9041,22 +9039,12 @@ int prtoe_perturbations_derivs(
     double V_phiphi   = pvecback[pba->index_bg_ddV_scf];
     double rho        = pvecback[pba->index_bg_rho_tot];
     double p          = pvecback[pba->index_bg_p_tot];
-    double rho_plus_p = rho + p;
 
-    /* Screened DHOST parameters */
+    /* Screened DHOST parameter */
     double beta_screened = pba->prtoe_beta / (1.0 + phi*phi);
 
     double delta_phi  = y[ppw->pv->index_pt_delta_prtoe];
     double ddelta_phi = y[ppw->pv->index_pt_ddelta_prtoe];
-
-    double Phi  = y[ppw->pv->index_pt_Phi_prtoe];
-    double dPhi = y[ppw->pv->index_pt_dPhi_prtoe];
-    double eta  = y[ppw->pv->index_pt_eta_prtoe];
-    double deta = y[ppw->pv->index_pt_deta_prtoe];
-
-    /* Perturbed Ricci scalar in Newtonian gauge */
-    double delta_R = -6.0 * (dPhi + 3.0*H*dPhi + (H_prime/a + 2.0*H*H)*Phi)
-                     + (2.0*k2/a2)*(Phi - 3.0*eta);
 
     /* Effective mass (complete) */
     double m_eff2 = V_phiphi
@@ -9067,89 +9055,24 @@ int prtoe_perturbations_derivs(
     /* High-k beta correction (main stiffness source) */
     double beta_k2_term = - (beta_screened * phi * pba->R_curvature * k2) / (pba->M_ew_prtoe * pba->M_ew_prtoe * a2);
 
-    /* Metric sourcing (fully consistent with slip equation) */
-    double metric_source =
-          - (F_phi / F) * delta_R
-        + (F_phi / F) * (H_prime / a + 2.0*H*H) * delta_phi
-        + (F_phi / F) * (3.0*dPhi + (k2/a2)*eta)
-        + (beta_screened * phi / (pba->M_ew_prtoe * pba->M_ew_prtoe)) * (delta_R * dphi + pba->R_curvature * ddelta_phi);
-
-    /* Full delta_phi'' equation */
+    /* === Reduced field equation (metric sourcing removed for now) ===
+       δφ'' + (2H + F_φ/F * dφ) δφ' + (k²/a² + m_eff² + β_k² term) δφ = 0
+       Metric sources computed separately in metric_sources() from Friedmann constraints
+    */
     dy[ppw->pv->index_pt_ddelta_prtoe] =
           - (2.0*H + (F_phi/F)*dphi) * ddelta_phi
-        - (k2/a2 + m_eff2 + beta_k2_term) * delta_phi
-        + metric_source;
+          - (k2/a2 + m_eff2 + beta_k2_term) * delta_phi;
 
     dy[ppw->pv->index_pt_delta_prtoe] = ddelta_phi;
 
-    /* ============================================================
-       PRTOE STRESS-ENERGY + METRIC POTENTIALS (COMBINED)
-       ============================================================ */
-    
-    /* Reconstruct delta_F and derivatives */
-    double delta_F       = F_phi * delta_phi;
-    double delta_F_prime = F_phiphi * dphi * delta_phi + F_phi * ddelta_phi;
-    
-    /* Perturbed Energy Density and Pressure (complete) */
-    double delta_rho_prtoe =
-          F * (k2 * delta_phi) / a2
-        + F_phi * (3.0 * H * dphi * delta_phi + dphi * ddelta_phi)
-        + delta_F * rho / F
-        + F * (dphi * ddelta_phi) / a
-        + F_phi * (k2 / a2) * delta_phi * Phi
-        + (beta_screened * phi) * (k2 / a2) * delta_phi;
-    
-    double delta_p_prtoe =
-        - F * (k2 * delta_phi) / (3.0 * a2)
-        + delta_F * p / F
-        - F_phi * (dphi * ddelta_phi) / 3.0
-        + (F_phi / F) * (k2 / a2) * delta_phi * eta
-        - (beta_screened * phi / 3.0) * (k2 / a2) * delta_phi;
-    
-    /* Momentum Density Contribution (complete) */
-    double rho_plus_p_theta_prtoe =
-          F_phi * ddelta_phi
-        + delta_F_prime * rho_plus_p / F
-        + F * (k2 * ddelta_phi) / (3.0 * a)
-        + F_phi * (k2 / a2) * delta_phi * dphi
-        + beta_screened * phi * (k2 / a2) * ddelta_phi;
-    
-    /* Add to totals */
-    ppw->delta_rho += delta_rho_prtoe;
-    ppw->delta_p += delta_p_prtoe;
-    ppw->rho_plus_p_theta += rho_plus_p_theta_prtoe / a;
-    
-    /* ============================================================
-       Evolution of Phi_prtoe (from trace Einstein equation)
-       ============================================================ */
-    double prtoe_trace_source =
-          -4.0*M_PI*(delta_rho_prtoe + 3.0*delta_p_prtoe)/a2
-        + (F_phi / F)*(delta_R + 2.0*pba->R_curvature*Phi)
-        + (beta_screened * phi / (pba->M_ew_prtoe * pba->M_ew_prtoe))
-            * (pba->R_curvature*delta_phi + delta_R*phi);
-    
-    dy[ppw->pv->index_pt_dPhi_prtoe] =
-          -H * dPhi
-        - (k2/(3.0*a2))*(Phi - eta)
-        + prtoe_trace_source
-        + (beta_screened * phi / (pba->M_ew_prtoe * pba->M_ew_prtoe))
-            * (delta_R * dphi + pba->R_curvature * ddelta_phi);
-    
-    dy[ppw->pv->index_pt_Phi_prtoe] = dPhi;
-    
-    /* ============================================================
-       Evolution of eta_prtoe (SLIP EQUATION)
-       (From traceless Einstein equation + beta-term)
-       ============================================================ */
-    double delta_R_ij_traceless = (k2 / a2) * (Phi - eta);
-    
-    dy[ppw->pv->index_pt_deta_prtoe] =
-          -H * deta
-        - (k2 / (3.0 * a2)) * (Phi - eta)
-        + (beta_screened * phi / (pba->M_ew_prtoe * pba->M_ew_prtoe))
-            * (pba->R_curvature * ddelta_phi + delta_R * dphi + k2 * (dPhi - deta));
-    
-    dy[ppw->pv->index_pt_eta_prtoe] = deta;
+    /* === Freeze metric potential perturbations ===
+       These are now determined from constraints (Friedmann equations) in metric_sources()
+       not evolved as independent degrees of freedom
+    */
+    dy[ppw->pv->index_pt_Phi_prtoe] = 0.0;
+    dy[ppw->pv->index_pt_dPhi_prtoe] = 0.0;
+    dy[ppw->pv->index_pt_eta_prtoe] = 0.0;
+    dy[ppw->pv->index_pt_deta_prtoe] = 0.0;
 
   } else if (pba->use_prtoe == _TRUE_) {
 
