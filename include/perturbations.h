@@ -962,6 +962,20 @@ extern "C" {
                            ErrorMsg error_message
                            );
 
+  int prtoe_perturbations_derivs(
+                                 struct precision * ppr,
+                                 struct background * pba,
+                                 struct thermodynamics * pth,
+                                 struct perturbations * ppt,
+                                 int index_md,
+                                 double k,
+                                 double tau,
+                                 double * y,
+                                 double * dy,
+                                 struct perturbations_workspace * ppw,
+                                 ErrorMsg error_message
+                                 );
+
   int perturbations_tca_slip_and_shear(
                                        double * y,
                                        void * parameters_and_workspace,

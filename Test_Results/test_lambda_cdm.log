@@ -1,0 +1,18 @@
+=== Running test_lambda_cdm.ini at 2026-06-30T00:58:14-06:00 ===
+Running CLASS version v3.3.4
+Computing background
+ -> age = 13.811548 Gyr
+ -> conformal age = 0.000000 Mpc
+ -> N_eff = 3.044 (summed over all species that are non-relativistic at early times) 
+ -> radiation/matter equality at z = inf
+    corresponding to conformal time = 0.000000 Mpc
+
+
+Error in thermodynamics_init 
+=>thermodynamics_init(L:411) :error in thermodynamics_calculate_remaining_quantities(ppr,pba,pth,pvecback);
+=>thermodynamics_calculate_remaining_quantities(L:1743) :error in thermodynamics_calculate_baryon_optical_depth(pba,pth,pvecback);
+=>thermodynamics_calculate_baryon_optical_depth(L:3190) :error in background_at_tau(pba, pth->tau_table[index_tau], normal_info, inter_closeby, &last_index_back, pvecback);
+=>background_at_tau(L:271) :error in background_at_z(pba,z,return_format,inter_mode,last_index,pvecback);
+=>background_at_z(L:218) :error in array_interpolate_spline_growing_closeby( pba->loga_table, pba->bt_size, pba->background_table, pba->d2background_dloga2_table, pba->bg_size, loga, last_index, pvecback, pvecback_size, pba->error_message);
+=>array_interpolate_spline_growing_closeby(L:2544) : x=nan < x_min=-4.144653e+01
+EXIT_STATUS=1

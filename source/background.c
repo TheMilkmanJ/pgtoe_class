@@ -156,6 +156,11 @@ int background_at_z(
   /** - check that log(a) = log(1/(1+z)) = -log(1+z) is in the pre-computed range */
   loga = -log(1+z);
 
+  /* Defensive check: ensure loga is finite before passing to spline routines */
+  class_test(!isfinite(loga),
+             pba->error_message,
+             "background_at_z: computed loga is NaN for z=%e (1+z=%e). Check tau/z conversions or table construction.", z, 1.+z);
+
   if (loga < pba->loga_table[0]) {
     if (pba->loga_table[0] - loga < 1e-10) {
       loga = pba->loga_table[0];
@@ -571,9 +576,81 @@ int background_functions(
     /* F_phiphi = d²F/dφ² = xi_eff * A_primeprime + 2 * A_prime * dxi_eff_dphi + A * d²xi_eff_dφ² */
     double F_phiphi = xi_eff * A_primeprime + 2.0 * A_prime * dxi_eff_dphi + A * d2xi_eff_dphi2;
 
-    pvecback[pba->index_bg_F_prtoe]       = F;
-    pvecback[pba->index_bg_F_phi_prtoe]   = F_phi;
-    pvecback[pba->index_bg_F_phiphi_prtoe] = F_phiphi;
+    /* Compute third derivative F_phiphiphi numerically (5-point central finite difference)
+       f'''(0) ≈ (-f(x+2d) + 2 f(x+d) - 2 f(x-d) + f(x-2d)) / (2 d^3)
+       where f = F(phi) = 1 + xi_eff(phi) * A(phi). */
+    double phi_p = phi + dphi_numerical;
+    double phi_m = phi - dphi_numerical;
+    double phi_2p = phi + 2.0 * dphi_numerical;
+    double phi_2m = phi - 2.0 * dphi_numerical;
+
+    double u_p = (phi_p - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+    double u_m = (phi_m - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+    double u_2p = (phi_2p - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+    double u_2m = (phi_2m - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+
+    double A_p = 0.5 * (1.0 + tanh(u_p));
+    double A_m = 0.5 * (1.0 + tanh(u_m));
+    double A_2p = 0.5 * (1.0 + tanh(u_2p));
+    double A_2m = 0.5 * (1.0 + tanh(u_2m));
+
+    double xi_eff_p = get_xi_eff(pba, phi_p);
+    double xi_eff_m = get_xi_eff(pba, phi_m);
+    double xi_eff_2p = get_xi_eff(pba, phi_2p);
+    double xi_eff_2m = get_xi_eff(pba, phi_2m);
+
+    double F_p = 1.0 + xi_eff_p * A_p;
+    double F_m = 1.0 + xi_eff_m * A_m;
+    double F_2p = 1.0 + xi_eff_2p * A_2p;
+    double F_2m = 1.0 + xi_eff_2m * A_2m;
+
+    double denom = 2.0 * dphi_numerical * dphi_numerical * dphi_numerical;
+    double F_phiphiphi = (-F_2p + 2.0 * F_p - 2.0 * F_m + F_2m) / denom;
+
+    if (pba->use_prtoe == _TRUE_ && prtoe_is_physically_active(pba)) {
+      pvecback[pba->index_bg_F_prtoe]       = F;
+      pvecback[pba->index_bg_F_phi_prtoe]   = F_phi;
+      pvecback[pba->index_bg_F_phiphi_prtoe] = F_phiphi;
+      pvecback[pba->index_bg_F_phiphiphi_prtoe] = F_phiphiphi;
+    }
+    else {
+      if (pba->index_bg_F_prtoe >= 0) pvecback[pba->index_bg_F_prtoe] = 0.0;
+      if (pba->index_bg_F_phi_prtoe >= 0) pvecback[pba->index_bg_F_phi_prtoe] = 0.0;
+      if (pba->index_bg_F_phiphi_prtoe >= 0) pvecback[pba->index_bg_F_phiphi_prtoe] = 0.0;
+      if (pba->index_bg_F_phiphiphi_prtoe >= 0) pvecback[pba->index_bg_F_phiphiphi_prtoe] = 0.0;
+    }
+    /* Compute and store third derivative F_phiphiphi numerically for perturbation use */
+    {
+      double dphi_numerical = 1e-8;
+      double phi_p = phi + dphi_numerical;
+      double phi_m = phi - dphi_numerical;
+      double phi_2p = phi + 2.0 * dphi_numerical;
+      double phi_2m = phi - 2.0 * dphi_numerical;
+
+      double u_p = (phi_p - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+      double u_m = (phi_m - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+      double u_2p = (phi_2p - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+      double u_2m = (phi_2m - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+
+      double A_p = 0.5 * (1.0 + tanh(u_p));
+      double A_m = 0.5 * (1.0 + tanh(u_m));
+      double A_2p = 0.5 * (1.0 + tanh(u_2p));
+      double A_2m = 0.5 * (1.0 + tanh(u_2m));
+
+      double xi_eff_p = get_xi_eff(pba, phi_p);
+      double xi_eff_m = get_xi_eff(pba, phi_m);
+      double xi_eff_2p = get_xi_eff(pba, phi_2p);
+      double xi_eff_2m = get_xi_eff(pba, phi_2m);
+
+      double F_p = 1.0 + xi_eff_p * A_p;
+      double F_m = 1.0 + xi_eff_m * A_m;
+      double F_2p = 1.0 + xi_eff_2p * A_2p;
+      double F_2m = 1.0 + xi_eff_2m * A_2m;
+
+      double denom = 2.0 * dphi_numerical * dphi_numerical * dphi_numerical;
+      double F_phiphiphi_val = (-F_2p + 2.0 * F_p - 2.0 * F_m + F_2m) / denom;
+      pvecback[pba->index_bg_F_phiphiphi_prtoe] = F_phiphiphi_val;
+    }
 
     /* === Covariant Activation: Use rho_phi / rho_r ratio ===
      * This is the PHYSICAL activation condition: field becomes dynamical when its
@@ -1428,24 +1505,45 @@ int background_indices(
   class_define_index(pba->index_bg_rho_dr,pba->has_dr,index_bg,1);
 
   /* - indices for PRTOE specific quantities in the background table (output) */
-  class_define_index(pba->index_bg_phi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_dphi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_ddphi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_rho_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_p_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_rho_dark_energy, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_p_dark_energy, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_phi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_phiphi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_phiphiphi_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_meff2_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_Q_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_cs2_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_dot_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_F_ddot_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_K_prtoe, pba->use_prtoe, index_bg, 1);
-  class_define_index(pba->index_bg_cT2_prtoe, pba->use_prtoe, index_bg, 1);
+  if (pba->use_prtoe == _TRUE_) {
+    class_define_index(pba->index_bg_phi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_dphi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_ddphi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_rho_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_p_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_rho_dark_energy, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_p_dark_energy, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_phi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_phiphi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_phiphiphi_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_meff2_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_Q_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_cs2_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_dot_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_F_ddot_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_K_prtoe, _TRUE_, index_bg, 1);
+    class_define_index(pba->index_bg_cT2_prtoe, _TRUE_, index_bg, 1);
+  } else {
+    pba->index_bg_phi_prtoe = -1;
+    pba->index_bg_dphi_prtoe = -1;
+    pba->index_bg_ddphi_prtoe = -1;
+    pba->index_bg_rho_prtoe = -1;
+    pba->index_bg_p_prtoe = -1;
+    pba->index_bg_rho_dark_energy = -1;
+    pba->index_bg_p_dark_energy = -1;
+    pba->index_bg_F_prtoe = -1;
+    pba->index_bg_F_phi_prtoe = -1;
+    pba->index_bg_F_phiphi_prtoe = -1;
+    pba->index_bg_F_phiphiphi_prtoe = -1;
+    pba->index_bg_meff2_prtoe = -1;
+    pba->index_bg_Q_prtoe = -1;
+    pba->index_bg_cs2_prtoe = -1;
+    pba->index_bg_F_dot_prtoe = -1;
+    pba->index_bg_F_ddot_prtoe = -1;
+    pba->index_bg_K_prtoe = -1;
+    pba->index_bg_cT2_prtoe = -1;
+  }
 
   /* - indices for scalar field */
   class_define_index(pba->index_bg_phi_scf,pba->has_scf,index_bg,1);
@@ -1550,8 +1648,13 @@ int background_indices(
   class_define_index(pba->index_bi_rho_fld,pba->has_fld,index_bi,1);
 
   /* -> indices for PRTOE field integration (solver) */
-  class_define_index(pba->index_bi_phi_prtoe, pba->use_prtoe, index_bi, 1);
-  class_define_index(pba->index_bi_dphi_prtoe, pba->use_prtoe, index_bi, 1);
+  if (pba->use_prtoe == _TRUE_) {
+    class_define_index(pba->index_bi_phi_prtoe, _TRUE_, index_bi, 1);
+    class_define_index(pba->index_bi_dphi_prtoe, _TRUE_, index_bi, 1);
+  } else {
+    pba->index_bi_phi_prtoe = -1;
+    pba->index_bi_dphi_prtoe = -1;
+  }
 
   /* -> scalar field and its derivative wrt conformal time (Zuma) */
   class_define_index(pba->index_bi_phi_scf,pba->has_scf == _TRUE_ && pba->use_prtoe == _FALSE_,index_bi,1);
@@ -2412,6 +2515,12 @@ int background_solve(
   }
 
   /** - fill tables of second derivatives (in view of spline interpolation) */
+
+  if (pba->background_verbose > 1) {
+    printf("DEBUG: bt_size=%d, loga_table[0]=%e, loga_table[end]=%e, tau_table[0]=%e, tau_table[end]=%e\n",
+           pba->bt_size, pba->loga_table[0], pba->loga_table[pba->bt_size-1], pba->tau_table[0], pba->tau_table[pba->bt_size-1]);
+  }
+
   class_call(array_spline_table_lines(pba->z_table,
                                       pba->bt_size,
                                       pba->tau_table,
@@ -3080,6 +3189,11 @@ int background_derivs(
   /** - calculate derivative of conformal time \f$ d\tau/dloga = 1/aH \f$ */
   dy[pba->index_bi_tau] = 1./a/H;
 
+  /* Debug: print H and tau-derivative for diagnostic purposes */
+  if (pba->background_verbose > 2) {
+    printf("DEBUG background_derivs: loga=%e a=%e H=%e dy_tau=%e\n", loga, a, H, dy[pba->index_bi_tau]);
+  }
+
   class_test(pvecback[pba->index_bg_rho_g] <= 0.,
              error_message,
              "rho_g = %e instead of strictly positive",pvecback[pba->index_bg_rho_g]);
@@ -3306,6 +3420,17 @@ int background_sources(
 
   /** - corresponding redhsift 1/a-1 */
   pba->z_table[index_loga] = MAX(0.,1./a-1.);
+
+  /** - Debug prints: sample tau evolution at first, last and decile indices */
+  if (pba->background_verbose > 1) {
+    int sample_step = MAX(1, pba->bt_size/10);
+    if (index_loga == 0 || index_loga == pba->bt_size-1 || index_loga % sample_step == 0) {
+      printf("DEBUG background_sources: index=%d/%d loga=%e a=%e tau_y=%e dy_tau=%e\n",
+             index_loga, pba->bt_size-1, loga, a, y[pba->index_bi_tau], dy[pba->index_bi_tau]);
+    printf("DEBUG mapping: bi_size=%d index_bi_tau=%d y[index_bi_tau]=%g dy[index_bi_tau]=%g\n",
+           pba->bi_size, pba->index_bi_tau, y[pba->index_bi_tau], dy[pba->index_bi_tau]);
+    }
+  }
 
   /** - corresponding conformal time */
   pba->tau_table[index_loga] = y[pba->index_bi_tau];
