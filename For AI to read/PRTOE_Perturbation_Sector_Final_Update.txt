@@ -1,0 +1,157 @@
+# PRTOE Perturbation Sector - FINAL UPDATE
+# Complete the linear perturbation module in CLASS
+# Pass this entire file to Mistral AI CLI
+
+## Instructions for Mistral AI
+
+Apply these changes to finish the PRTOE perturbation sector.
+This is the final major update needed before the linear perturbations can be considered complete.
+
+Priority:
+1. Update the delta_phi evolution equation to the full form below.
+2. Implement the complete delta_R expression.
+3. Replace the current Einstein equations approximation with the full version using explicit δF, δF', δF'' in all four equations.
+4. Ensure phi_primeprime (ddphi) is available (either stored from background or computed on the fly from the Klein-Gordon equation).
+
+Add clear comments referencing "PRTOE full perturbation implementation".
+
+---
+
+## 1. Full delta_phi Evolution Equation
+
+Replace the current delta_phi evolution with this complete form:
+
+```latex
+\delta\phi'' 
++ 2\mathcal{H} \left(1 + \frac{F_\phi \phi_0'}{2 F}\right) \delta\phi' 
++ \Biggl[
+    k^2 
+    + a^2 V_{\phi\phi}
+    - \frac{F_\phi}{F} (\phi_0'' + 2 \mathcal{H} \phi_0')
+    + \frac{F_{\phi\phi}}{F} \phi_0'^2
+  \Biggr] \delta\phi
+=
+- \phi_0' (\Psi' + 3 \Phi')
++ \frac{F_\phi}{2 F} \bigl( \phi_0'^2 (\Psi - 3\Phi) - a^2 \delta R \bigr)
++ \frac{F_{\phi\phi} \phi_0'}{F} (\delta\phi' - \phi_0' \Phi)
++ \frac{F_{\phi\phi\phi} \phi_0'^2 }{2 F} \delta\phi
+```
+
+**Implementation notes:**
+- The coefficient of δφ now includes the term `- (F_φ / F) * φ₀''`. You must have access to `phi_primeprime`.
+- The source term includes `Ψ'` (time derivative of the Bardeen potential). Make sure `Psi_prime` is available in the workspace.
+- The `F_φφφ` term should already be partially present — ensure it is active and correct.
+
+---
+
+## 2. Complete delta_R Expression
+
+Use this full linearized Ricci scalar:
+
+```latex
+\delta R = -6 a^{-2} \Bigl[
+    \Psi'' + 4 \mathcal{H} \Psi'
+    + \left( \frac{a''}{a} + 2 \mathcal{H}^2 \right) \Phi
+    + \frac{k^2}{3} (\Psi - \Phi)
+\Bigr]
+```
+
+You will need `Psi_primeprime` (second time derivative of Ψ) when computing `delta_R`. This is typically available or can be reconstructed from the Einstein equations.
+
+---
+
+## 3. Full Einstein Equations with Explicit δF Terms
+
+This replaces any `G_eff = 1/F` approximation.
+
+### First compute these quantities
+
+```c
+double F            = pvecback[pba->index_bg_F_prtoe];
+double F_phi        = pvecback[pba->index_bg_F_phi_prtoe];
+double F_phiphi     = pvecback[pba->index_bg_F_phiphi_prtoe];
+double F_phiphiphi  = pvecback[pba->index_bg_F_phiphiphi_prtoe];
+
+double phi_prime    = pvecback[pba->index_bg_phi_prime_prtoe];
+double ddphi        = pvecback[pba->index_bg_ddphi_prtoe];   // phi''
+
+double delta_F      = F_phi * delta_phi;
+double delta_F_p    = F_phiphi * phi_prime * delta_phi + F_phi * delta_phi_prime;
+double delta_F_pp   = F_phiphiphi * (phi_prime*phi_prime) * delta_phi
+                    + F_phiphi * (ddphi * delta_phi + 2.0*phi_prime*delta_phi_prime)
+                    + F_phi * delta_phi_primeprime;
+```
+
+### 00 Equation (Hamiltonian Constraint)
+
+```c
+double einstein_00 =
+    k*k * Phi
+    + 3.0 * a_prime_over_a * (Phi_prime + a_prime_over_a * Psi)
+    + (a*a / (2.0*F)) * (delta_rho + delta_rho_scf
+        + 3.0*a_prime_over_a*delta_F_p - k*k*delta_F)
+    - (3.0*a_prime_over_a * F_phi * phi_prime / (2.0*F)) * (Psi - Phi);
+```
+
+### 0i Equation (Momentum Constraint)
+
+```c
+double einstein_0i =
+    k*k * (Phi_prime + a_prime_over_a * Psi)
+    - (a*a / (2.0*F)) * ((rho_tot + p_tot)*theta_tot + k*k*delta_F_p);
+```
+
+### ij Trace Equation
+
+```c
+double einstein_ij_trace =
+    Phi_primeprime
+    + a_prime_over_a * (Psi_prime + 2.0*Phi_prime)
+    + (2.0*a_primeprime_over_a + a_prime_over_a*a_prime_over_a) * Psi
+    - (a*a / (2.0*F)) * (delta_p + delta_p_scf
+        - delta_F_pp - 2.0*a_prime_over_a*delta_F_p + (k*k/3.0)*delta_F)
+    + (F_phi * phi_prime / (2.0*F)) * (Psi_prime + 3.0*Phi_prime);
+```
+
+### ij Traceless (Slip) Equation
+
+```c
+double einstein_slip =
+    (k*k + 2.0*a_prime_over_a * dtau) * (Psi - Phi)
+    - (a*a / F) * (Pi_tot + delta_F_pp + 2.0*a_prime_over_a*delta_F_p - (k*k/3.0)*delta_F)
+    - (3.0 * F_phi * phi_prime / F) * (Phi_prime - Psi_prime);
+```
+
+Store `einstein_00`, `einstein_0i`, `einstein_ij_trace`, and `einstein_slip` in the appropriate metric vector indices.
+
+Add comments: "PRTOE: full δF implementation - explicit δF, δF', δF'' in all Einstein equations"
+
+---
+
+## 4. Making phi_primeprime Available
+
+Option A (recommended): Store it in the background table during `background_functions()`.
+
+Add to background indices:
+```c
+index_bg_ddphi_prtoe     // phi''
+```
+
+Then compute and store `ddphi` from the Klein-Gordon equation after you have all other background quantities.
+
+Option B: Recompute it on the fly in perturbations using the background Klein-Gordon equation when needed.
+
+---
+
+## Final Checklist for Mistral AI
+
+- [ ] delta_phi equation updated to full form (includes φ₀'' term and Ψ')
+- [ ] delta_R implemented with all terms (Ψ'', a''/a, etc.)
+- [ ] All four Einstein equations now use explicit δF, δF', δF''
+- [ ] phi_primeprime (ddphi) is accessible
+- [ ] Stability quantities (F, K, Q, meff2) remain active from previous updates
+- [ ] Code compiles and runs without immediate crashes on a test parameter file
+
+This completes the linear perturbation sector for the PRTOE model.
+
+End of final update file.

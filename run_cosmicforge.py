@@ -52,11 +52,15 @@ import json
 from scipy.optimize import minimize
 
 # Dynamic search for classy build directory
-build_dirs = glob.glob("/home/themilkmanj/prtoe_class/build/lib.*")
-if build_dirs:
-    sys.path.insert(0, build_dirs[0])
-
-from cobaya.model import get_model
+classy_build_root = os.environ.get("CLASSY_BUILD_ROOT")
+if classy_build_root:
+    build_dirs = sorted(glob.glob(os.path.join(classy_build_root, "build", "lib.*")))
+    if build_dirs:
+        sys.path.insert(0, build_dirs[-1])
+else:
+    build_dirs = sorted(glob.glob(os.path.join(os.path.dirname(__file__), "build", "lib.*")))
+    if build_dirs:
+        sys.path.insert(0, build_dirs[-1])
 
 class LocalSurrogate:
     """
@@ -309,7 +313,7 @@ def run_polychord_equivalent(info_cfg, output_prefix, polychord_opts=None):
         from prtoe_class.backend.parsers_adapter import parse_polychord_stats
         stats = parse_polychord_stats(stats_path, resume_path)
     except Exception as e:
-        logger.warning(f"Could not parse PolyChord stats after optimization: {e}")
+        print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [polychord] Warning: could not parse PolyChord stats after optimization: {e}")
         stats = None
 
     return {"prefix": pol_prefix, "stats": stats, "updated_info": updated_info}
@@ -356,7 +360,7 @@ def compare_with_polychord(optimizer_prefix, polychord_prefix, ess_threshold=100
     except Exception:
         pol = None
 
-    # Delta chi2: prefer best-fit chi2 found in optimizer summary and polychord's best-fit details
+    # Delta chi2: prefer seeded vs unseeded comparison when both present
     try:
         opt_chi2 = opt.get('best_fit', {}).get('penalized_chi2') if opt else None
         pol_chi2 = None
@@ -434,57 +438,114 @@ def compute_covariance(best_x, target_func, sampled_names, info):
     
     # Define step sizes for each parameter (e.g. 1.5% of the prior range)
     h = np.zeros(n)
+    bounds = []
     for i, name in enumerate(sampled_names):
         prior = info["params"][name].get("prior", {})
         if "min" in prior and "max" in prior:
-            h[i] = 0.015 * (float(prior["max"]) - float(prior["min"]))
+            min_val = float(prior["min"])
+            max_val = float(prior["max"])
+            range_val = max_val - min_val
+            if range_val <= 0:
+                raise ValueError(f"Parameter {name} has invalid prior range: min={min_val}, max={max_val}. Range must be positive.")
+            h[i] = 0.015 * range_val
+            bounds.append((min_val, max_val))
         else:
             h[i] = 0.015 * max(1e-4, abs(best_x[i]))
+            bounds.append((-np.inf, np.inf))
             
     f_best = target_func(best_x)
     
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [mcmc] Computing full {n}x{n} Hessian matrix...")
     sys.stdout.flush()
     
-    # 1. Compute diagonal elements
+    # 1. Compute diagonal elements with one-sided fallback near bounds
     for i in range(n):
-        x_plus = np.copy(best_x)
-        x_plus[i] += h[i]
-        f_plus = target_func(x_plus)
+        low, high = bounds[i]
+        can_plus = (best_x[i] + h[i]) <= high or not np.isfinite(high)
+        can_minus = (best_x[i] - h[i]) >= low or not np.isfinite(low)
         
-        x_minus = np.copy(best_x)
-        x_minus[i] -= h[i]
-        f_minus = target_func(x_minus)
+        if can_plus and can_minus:
+            # Use symmetric 2-point difference
+            x_plus = np.copy(best_x)
+            x_plus[i] += h[i]
+            f_plus = target_func(x_plus)
+            
+            x_minus = np.copy(best_x)
+            x_minus[i] -= h[i]
+            f_minus = target_func(x_minus)
+            
+            hessian[i, i] = (f_plus - 2.0 * f_best + f_minus) / (h[i] ** 2)
+        elif can_plus:
+            # Use forward difference (one-sided)
+            x_plus = np.copy(best_x)
+            x_plus[i] += h[i]
+            f_plus = target_func(x_plus)
+            
+            x_plus2 = np.copy(best_x)
+            x_plus2[i] += 2.0 * h[i]
+            f_plus2 = target_func(x_plus2)
+            
+            hessian[i, i] = (f_plus2 - 2.0 * f_plus + f_best) / (h[i] ** 2)
+        elif can_minus:
+            # Use backward difference (one-sided)
+            x_minus = np.copy(best_x)
+            x_minus[i] -= h[i]
+            f_minus = target_func(x_minus)
+            
+            x_minus2 = np.copy(best_x)
+            x_minus2[i] -= 2.0 * h[i]
+            f_minus2 = target_func(x_minus2)
+            
+            hessian[i, i] = (f_minus2 - 2.0 * f_minus + f_best) / (h[i] ** 2)
+        else:
+            # Parameter is at a hard bound - use small diagonal value
+            hessian[i, i] = 1e-4
         
-        hessian[i, i] = (f_plus - 2.0 * f_best + f_minus) / (h[i] ** 2)
-        
-    # 2. Compute off-diagonal elements
+    # 2. Compute off-diagonal elements with bound checking
     for i in range(n):
         for j in range(i + 1, n):
-            # 4-point formula for cross derivative
-            x_pp = np.copy(best_x)
-            x_pp[i] += h[i]
-            x_pp[j] += h[j]
-            f_pp = target_func(x_pp)
+            low_i, high_i = bounds[i]
+            low_j, high_j = bounds[j]
             
-            x_pm = np.copy(best_x)
-            x_pm[i] += h[i]
-            x_pm[j] -= h[j]
-            f_pm = target_func(x_pm)
+            # Check if all 4 perturbations are valid
+            can_pp = ((best_x[i] + h[i]) <= high_i or not np.isfinite(high_i)) and \
+                     ((best_x[j] + h[j]) <= high_j or not np.isfinite(high_j))
+            can_pm = ((best_x[i] + h[i]) <= high_i or not np.isfinite(high_i)) and \
+                     ((best_x[j] - h[j]) >= low_j or not np.isfinite(low_j))
+            can_mp = ((best_x[i] - h[i]) >= low_i or not np.isfinite(low_i)) and \
+                     ((best_x[j] + h[j]) <= high_j or not np.isfinite(high_j))
+            can_mm = ((best_x[i] - h[i]) >= low_i or not np.isfinite(low_i)) and \
+                     ((best_x[j] - h[j]) >= low_j or not np.isfinite(low_j))
             
-            x_mp = np.copy(best_x)
-            x_mp[i] -= h[i]
-            x_mp[j] += h[j]
-            f_mp = target_func(x_mp)
-            
-            x_mm = np.copy(best_x)
-            x_mm[i] -= h[i]
-            x_mm[j] -= h[j]
-            f_mm = target_func(x_mm)
-            
-            d2f_dxdy = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h[i] * h[j])
-            hessian[i, j] = d2f_dxdy
-            hessian[j, i] = d2f_dxdy
+            if can_pp and can_pm and can_mp and can_mm:
+                # Use 4-point formula for cross derivative
+                x_pp = np.copy(best_x)
+                x_pp[i] += h[i]
+                x_pp[j] += h[j]
+                f_pp = target_func(x_pp)
+                
+                x_pm = np.copy(best_x)
+                x_pm[i] += h[i]
+                x_pm[j] -= h[j]
+                f_pm = target_func(x_pm)
+                
+                x_mp = np.copy(best_x)
+                x_mp[i] -= h[i]
+                x_mp[j] += h[j]
+                f_mp = target_func(x_mp)
+                
+                x_mm = np.copy(best_x)
+                x_mm[i] -= h[i]
+                x_mm[j] -= h[j]
+                f_mm = target_func(x_mm)
+                
+                d2f_dxdy = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h[i] * h[j])
+                hessian[i, j] = d2f_dxdy
+                hessian[j, i] = d2f_dxdy
+            else:
+                # Cannot compute off-diagonal near bounds - assume independence
+                hessian[i, j] = 0.0
+                hessian[j, i] = 0.0
             
     # Regularize Hessian to ensure it is positive-definite
     try:
@@ -663,9 +724,13 @@ def evaluate_constraints(point_dict, derived_dict, physical_constraints):
             }
             
             # Allowed node types
+            # Note: ast.Num is deprecated in Python 3.8+, use ast.Constant instead
             allowed_nodes = {
-                ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
-                ast.Name, ast.Call
+                ast.Expression, ast.BinOp, ast.UnaryOp, ast.Constant,
+                ast.Name, ast.Call,
+                ast.Load,
+                ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow,
+                ast.USub, ast.UAdd,
             }
             
             # Allowed function calls (only math functions that are safe)
@@ -684,11 +749,8 @@ def evaluate_constraints(point_dict, derived_dict, physical_constraints):
                         if abs(val) > 1e10:
                             raise ValueError(f"Numeric value too large: {val}")
                     return val
-                elif isinstance(node, ast.Num):  # Python < 3.8
-                    val = node.n
-                    if abs(val) > 1e10:
-                        raise ValueError(f"Numeric value too large: {val}")
-                    return val
+                # Note: ast.Num is deprecated in Python 3.8+, ast.Constant handles both
+                # For backwards compatibility, we keep this but it won't be used in Python 3.8+
                 elif isinstance(node, ast.Name):
                     if node.id in variables:
                         val = variables[node.id]
@@ -702,6 +764,10 @@ def evaluate_constraints(point_dict, derived_dict, physical_constraints):
                     right = eval_node(node.right)
                     op_type = type(node.op)
                     if op_type in operators:
+                        # Bound exponentiation before evaluating
+                        if op_type == ast.Pow:
+                            if isinstance(right, (int, float)) and abs(right) > 100:
+                                raise ValueError(f"Exponent {right} too large")
                         result = operators[op_type](left, right)
                         # Check result magnitude
                         if isinstance(result, (int, float)) and abs(result) > 1e10:
@@ -720,6 +786,8 @@ def evaluate_constraints(point_dict, derived_dict, physical_constraints):
                     else:
                         raise ValueError(f"Unsupported unary operator: {op_type}")
                 elif isinstance(node, ast.Call):
+                    if not isinstance(node.func, ast.Name):
+                        raise ValueError("Only direct function calls are allowed")
                     func_name = node.func.id
                     if func_name in allowed_functions:
                         args = [eval_node(arg) for arg in node.args]
@@ -742,7 +810,7 @@ def evaluate_constraints(point_dict, derived_dict, physical_constraints):
                 raise ValueError(f"Non-finite result: {result}")
             return float(result)
         except Exception as e:
-            return 0.0
+            raise ValueError(f"Invalid constraint expression {expr!r}: {e}") from e
 
     for c in physical_constraints:
         name = c.get("name", "unnamed_constraint")
@@ -871,11 +939,44 @@ def main():
         if not args.config_file:
             print("Error: config_file is required unless running in --test-toy mode.")
             sys.exit(1)
+        
+        # Validate config file exists and is readable
         config_path = os.path.abspath(args.config_file)
+        if not os.path.exists(config_path):
+            print(f"Error: Configuration file '{config_path}' does not exist.")
+            sys.exit(1)
+        if not os.path.isfile(config_path):
+            print(f"Error: Configuration path '{config_path}' is not a file.")
+            sys.exit(1)
+        if not os.access(config_path, os.R_OK):
+            print(f"Error: Configuration file '{config_path}' is not readable.")
+            sys.exit(1)
         
         # Load configuration
-        with open(config_path, "r") as f:
-            info = yaml.safe_load(f)
+        try:
+            with open(config_path, "r") as f:
+                info = yaml.safe_load(f)
+            if info is None:
+                print(f"Error: Configuration file '{config_path}' is empty or invalid YAML.")
+                sys.exit(1)
+        except yaml.YAMLError as e:
+            print(f"Error: Failed to parse YAML configuration file '{config_path}': {e}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: Failed to read configuration file '{config_path}': {e}")
+            sys.exit(1)
+
+        # Validate required YAML sections
+        required_sections = ["params"]
+        missing_sections = [section for section in required_sections if section not in info]
+        if missing_sections:
+            print(f"Error: Missing required sections in configuration: {', '.join(missing_sections)}")
+            sys.exit(1)
+        
+        # Validate params section has content
+        if not info.get("params") or len(info["params"]) == 0:
+            print("Error: 'params' section is empty. At least one parameter must be defined.")
+            sys.exit(1)
 
         # Load physical constraints from configuration or fall back to default PRTOE ones
         physical_constraints = info.get("physical_constraints")
@@ -915,7 +1016,11 @@ def main():
     log_file_path = f"{output_prefix}.log"
     out_dir = os.path.dirname(log_file_path)
     if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            print(f"Error: Failed to create output directory '{out_dir}': {e}")
+            sys.exit(1)
 
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [output] Output to be read-from/written-into folder '{os.path.dirname(output_prefix)}', with prefix '{os.path.basename(output_prefix)}'")
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] Launching Hybrid Cosmo Optimizer (Method: {args.method.upper()}, Multi-start: {args.multistart})...")
@@ -928,8 +1033,10 @@ def main():
     sampler_info = info.pop("sampler", {})
 
     if args.test_toy:
+        from cobaya.model import get_model
         model = ToyCosmoModel()
     else:
+        from cobaya.model import get_model
         model = get_model(info)
 
     # Identify sampled parameters
@@ -946,14 +1053,16 @@ def main():
             if "min" in prior and "max" in prior:
                 min_val = float(prior["min"])
                 max_val = float(prior["max"])
+                # Reject unbounded sampled parameters before BOBYQA/random multistart
+                if not np.isfinite(min_val) or not np.isfinite(max_val):
+                    raise ValueError(f"Parameter {name} has unbounded prior, which is not supported by BOBYQA/random multistart. Please specify finite min/max bounds.")
             elif "dist" in prior and prior["dist"] == "norm":
                 loc = float(prior.get("loc", 1.0))
                 scale = float(prior.get("scale", 0.0025))
                 min_val = loc - 5.0 * scale
                 max_val = loc + 5.0 * scale
             else:
-                min_val = -np.inf
-                max_val = np.inf
+                raise ValueError(f"Parameter {name} has no finite bounds specified, which is not supported by BOBYQA/random multistart. Please specify min/max bounds.")
                 
             bounds.append((min_val, max_val))
             
@@ -1054,7 +1163,9 @@ def main():
     constraint_violations = []  # Track constraint violations during run
     
     def target_function(x):
-        nonlocal global_best_chi2, global_best_point, global_best_logprior, global_best_logpost, global_best_loglikes, global_best_derived_dict, eval_count, surrogate_evals, mcmc_surrogate_hits, mcmc_total_calls, constraint_violations
+        nonlocal global_best_chi2, global_best_point, global_best_logprior, global_best_logpost, global_best_loglikes, global_best_derived_dict
+        nonlocal global_best_chi2_cmb, global_best_chi2_bao, global_best_chi2_sn
+        nonlocal eval_count, surrogate_evals, mcmc_surrogate_hits, mcmc_total_calls, constraint_violations
         
         if in_mcmc:
             mcmc_total_calls += 1
@@ -1625,6 +1736,10 @@ def main():
     print(f"\n {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] All multi-start runs finished!")
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] Best global Penalized Chi2: {best_overall_start_chi2:.4f}")
     sys.stdout.flush()
+
+    if not mode_results:
+        print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] ERROR: no optimization runs produced a valid mode.")
+        sys.exit(1)
  
     # Cluster distinct physical modes to group identical solutions
     print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] Clustering and ranking distinct solutions...")
@@ -1917,7 +2032,7 @@ def main():
                 # Compute unphysical fraction: fraction of global unphysical_points within mode neighborhood
                 try:
                     unphys = 0
-                    total_unphys = len(unphysical_points) if 'unphysical_points' in globals() else 0
+                    total_unphys = len(unphysical_points)
                     if total_unphys > 0:
                         # Use normalized distance in parameter ranges (xl/xu available in outer scope)
                         from math import sqrt
@@ -1989,7 +2104,7 @@ def main():
 
     # 3. Compute Combined Multimodal Bayesian Evidence
     if len(unique_modes) > 0:
-        log_z_values = [um["log_z"] for um in unique_modes]
+        log_z_values = np.asarray([um["log_z"] for um in unique_modes], dtype=float)
         max_logz = np.max(log_z_values)
         log_z_combined = max_logz + np.log(np.sum(np.exp(log_z_values - max_logz)))
     else:
@@ -2056,7 +2171,10 @@ def main():
         cf.write(f"  Multi-start Count : {args.multistart}\n")
         cf.write(f"  MCMC Steps/Mode   : {args.mcmc_steps}\n")
         cf.write(f"  Physical Const.   : {len(physical_constraints)} custom constraints loaded\n")
-        cf.write("  Surrogate Model   : Active (uncertainty-aware local GP surrogate)\n\n")
+        if active_surrogate is not None:
+            cf.write("  Surrogate Model   : Active (uncertainty-aware local GP surrogate)\n\n")
+        else:
+            cf.write("  Surrogate Model   : Disabled (direct CLASS evaluation only)\n\n")
         
         cf.write("================================================================================\n")
         cf.write("LIMITATIONS & ASSUMPTIONS\n")
@@ -2083,8 +2201,15 @@ def main():
     stats_raw_file = os.path.join(polychord_raw_dir, f"{os.path.basename(output_prefix)}.stats")
     
     best_mode = unique_modes[0] if unique_modes else None
-    best_x = [best_mode["point"][name] for name in sampled_names] if best_mode else best_overall_start_x
-    best_errors = best_mode["errors"] if best_mode else {}
+    if best_mode:
+        best_x = [best_mode["point"][name] for name in sampled_names]
+        best_errors = best_mode["errors"]
+    elif best_overall_start_x is not None:
+        best_x = best_overall_start_x
+        best_errors = {}
+    else:
+        print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] ERROR: no valid best-fit point available for stats file.")
+        sys.exit(1)
     
     # Calculate total dead points (eval_count before errors + MCMC chains of all modes)
     total_dead = eval_count
@@ -2235,6 +2360,9 @@ def main():
                 "ess": um.get('ess', {}),
                 "errors": um.get('errors', {}),
                 "cov_diag": cov_diag,
+                "surrogate_hit_rate": float(um.get('surrogate_hit_rate', 0.0)),
+                "rhat": um.get('rhat', {}),
+                "unphysical_fraction": float(um.get('unphysical_fraction', 0.0)),
             }
             summary['modes'].append(mode_entry)
 

@@ -1,0 +1,7 @@
+
+
+Error running background_init 
+=>background_init(L:1149) :error in background_solve(ppr,pba);
+=>background_solve(L:2311) :error in generic_evolver(background_derivs, loga_ini, loga_final, pvecback_integration, used_in_output, pba->bi_size, &bpaw, ppr->tol_background_integration, ppr->smallest_allowed_variation, background_timescale, ppr->background_integration_stepsize, pba->loga_table, pba->bt_size, background_sources, NULL, pba->error_message);
+=>evolver_ndf15(L:227) :error in (*derivs)(t0,y+1,f0+1,parameters_and_workspace_for_derivs,error_message);
+=>

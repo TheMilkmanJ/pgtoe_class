@@ -12,16 +12,16 @@ likelihood:
   sn.pantheonplusshoes: null
 theory:
   classy:
+    path: /home/themilkmanj/prtoe_class
     stop_at_error: false
     extra_args:
       use_prtoe: 'yes'
       non_linear: halofit
       output: mPk,tCl,pCl,lCl
+      modes: s
       N_ur: 2.0328
       N_ncdm: 1
       T_ncdm: 0.71611
-      base_path: /home/themilkmanj/prtoe_class
-    path: /home/themilkmanj/prtoe_class
 params:
   omega_b:
     prior:
@@ -78,7 +78,7 @@ params:
     latex: A_\mathrm{planck}
   xi_prtoe:
     prior:
-      min: 0
+      min: 1.0e-07
       max: 1.2e-05
     ref: 1.0e-07
     proposal: 1.0e-08
@@ -123,9 +123,22 @@ params:
   delta_prtoe:
     value: 0.0
     latex: \Delta_\mathrm{prtoe}
+  phi_c_prtoe:
+    prior:
+      min: -5.0
+      max: 5.0
+    ref: 0.0
+    proposal: 0.1
+    latex: \phi_{c,\mathrm{prtoe}}
+  delta_phi_prtoe:
+    prior:
+      min: 0.01
+      max: 5.0
+    ref: 0.1
+    proposal: 0.05
+    latex: \Delta\phi\mathrm{prtoe}
 sampler:
   polychord:
     nlive: 200
-    nprior: 200
     num_repeats: 80
     precision_criterion: 0.001

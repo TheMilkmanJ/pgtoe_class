@@ -1,0 +1,13 @@
+{
+  "engines": {
+    "workspace": {
+      "id": "workspace",
+      "name": "Current Workspace CLASS",
+      "class_path": "/home/themilkmanj/prtoe_class/scripts",
+      "python_exe": null,
+      "notes": "CLASS source tree at the dashboard working directory (includes PRTOE patches or any local modifications).",
+      "last_built": null
+    }
+  },
+  "active_id": "workspace"
+}

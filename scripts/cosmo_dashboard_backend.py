@@ -1027,7 +1027,7 @@ class StateManager:
         self.is_optimizer = False
         self.model_type = "general"  # Initialize for tracking database logging
         self.watchdog_alerts = []
-        self.auto_apply_watchdog = True
+        self.auto_apply_watchdog = False
         self.run_start_time = None
         self.localtunnel_url = None
         self.cosmo_curves_cache = None
@@ -2891,6 +2891,49 @@ from prtoe_class.backend.process_watcher import AdoptedProcess, find_and_adopt_r
 # Replace old on_event with lifespan in FastAPI constructor
 # (The app = FastAPI(...) is earlier; we will update it below if needed. For now the context manager is defined.)
 
+def _read_file_safely(file_path, max_retries=3, retry_delay=0.1):
+    """Read a file safely with retry logic for file access conflicts.
+    
+    Uses copy-then-read pattern to avoid blocking on files that may be
+    locked by PolyChord during active runs.
+    
+    Args:
+        file_path: Path to the file to read
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        
+    Returns:
+        Tuple of (file contents as string, success: bool)
+    """
+    import time
+    import shutil
+    import tempfile
+    
+    for attempt in range(max_retries):
+        try:
+            # Try to copy the file atomically first - this is faster than reading
+            # and less likely to block. If the file is locked, copy will fail.
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.tmp', delete=True) as tmp:
+                # Use shutil.copy2 which preserves metadata and is atomic on most systems
+                shutil.copy2(str(file_path), tmp.name)
+                # Now read the temp file
+                tmp.seek(0)
+                content = tmp.read()
+                return content, True
+        except (IOError, OSError, PermissionError, FileNotFoundError) as e:
+            # File might be locked or in the middle of being written
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            # On last attempt, try direct read as fallback
+            try:
+                with open(str(file_path), 'r') as f:
+                    return f.read(), True
+            except Exception:
+                return None, False
+    return None, False
+
+
 def get_realtime_posterior_stats(output_prefix):
     import numpy as np
 
@@ -2903,40 +2946,57 @@ def get_realtime_posterior_stats(output_prefix):
     data_parts = []
     is_initialization = False
 
-    if final_file.exists() and os.path.getsize(final_file) > 0:
-        root_name = str(final_file)
+    def _load_file_data(file_path, is_live_file=False):
+        """Load data from a file safely."""
+        if not file_path.exists() or file_path.stat().st_size == 0:
+            return None
+        
+        content, success = _read_file_safely(file_path)
+        if not success or content is None:
+            return None
+        
         try:
-            with open(root_name, "r") as f:
-                lines = f.readlines()
-            if len(lines) > 1:
-                start_idx = 1 if lines[0].startswith('#') else 0
-                d = np.loadtxt(lines[start_idx:-1])
-                if d.size > 0:
-                    data_parts.append(np.atleast_2d(d))
+            lines = content.splitlines()
+            if is_live_file:
+                # For live files, use all lines but handle incomplete last line
+                if len(lines) > 0:
+                    d = np.loadtxt(lines)
+                    if d.size > 0:
+                        d = np.atleast_2d(d)
+                        weights = np.ones((d.shape[0], 1))
+                        logL = -2.0 * d[:, -1:]
+                        params = d[:, :-1]
+                        return np.hstack((weights, logL, params))
+            else:
+                # For completed files, skip header if present and handle incomplete last line
+                if len(lines) > 1:
+                    start_idx = 1 if lines[0].startswith('#') else 0
+                    d = np.loadtxt(lines[start_idx:-1])
+                    if d.size > 0:
+                        return np.atleast_2d(d)
         except Exception:
             pass
+        return None
 
+    # Try final file first (run is complete)
+    if final_file.exists() and os.path.getsize(final_file) > 0:
+        d = _load_file_data(final_file, is_live_file=False)
+        if d is not None:
+            data_parts.append(d)
+
+    # If no final file, try raw files (run in progress)
     if not data_parts:
         if raw_file.exists() and os.path.getsize(raw_file) > 0:
-            try:
-                d = np.loadtxt(raw_file)
-                if d.size > 0:
-                    data_parts.append(np.atleast_2d(d))
-            except Exception:
-                pass
+            d = _load_file_data(raw_file, is_live_file=False)
+            if d is not None:
+                data_parts.append(d)
+        
+        # Only use live points if dead points are not yet populated (Initialization Phase)
         if not data_parts and live_file.exists() and os.path.getsize(live_file) > 0:
-            try:
-                d = np.loadtxt(live_file)
-                if d.size > 0:
-                    d = np.atleast_2d(d)
-                    is_initialization = True
-                    weights = np.ones((d.shape[0], 1))
-                    logL = -2.0 * d[:, -1:]
-                    params = d[:, :-1]
-                    d_mock = np.hstack((weights, logL, params))
-                    data_parts.append(d_mock)
-            except Exception:
-                pass
+            d = _load_file_data(live_file, is_live_file=True)
+            if d is not None:
+                is_initialization = True
+                data_parts.append(d)
 
     if not data_parts:
         return {}

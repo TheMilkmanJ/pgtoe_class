@@ -1,0 +1,4 @@
+[2026-06-28 21:50:11] ⚠️  DASHBOARD_PASS environment variable not set. A secure random password was generated for this session only.
+[2026-06-28 21:50:11] 📄 Credentials have been written to chains/dashboard_credentials.txt
+[2026-06-28 21:50:11]    Recommended: export DASHBOARD_USER=admin and DASHBOARD_PASS=... before starting to use a fixed one.
+[2026-06-28 21:50:11] 📄 Credentials saved to: chains/dashboard_credentials.txt

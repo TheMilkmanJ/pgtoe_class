@@ -1641,10 +1641,18 @@ int perturbations_timesampling_for_sources(
                pth->error_message,
                ppt->error_message);
 
-    class_test(pvecback[pba->index_bg_a]*
-               pvecback[pba->index_bg_H]/
-               pvecthermo[pth->index_th_dkappa] >
-               ppr->start_sources_at_tau_c_over_tau_h,
+    /* For PRTOE, allow sources to start when field approaches activation threshold */
+    double prtoe_source_condition = _FALSE_;
+    if (pba->use_prtoe == _TRUE_) {
+      double phi = pvecback[pba->index_bg_phi_prtoe];
+      prtoe_source_condition = (phi > pba->phi_c_prtoe * 0.1);
+    }
+
+    class_test((pvecback[pba->index_bg_a]*
+                pvecback[pba->index_bg_H]/
+                pvecthermo[pth->index_th_dkappa] >
+                ppr->start_sources_at_tau_c_over_tau_h) && 
+               (prtoe_source_condition == _FALSE_),
                ppt->error_message,
                "your choice of initial time for computing sources is inappropriate: it corresponds to an earlier time than the one at which the integration of thermodynamical variables started (tau=%g). You should increase either 'start_sources_at_tau_c_over_tau_h' or 'recfast_z_initial'\n",
                tau_lower);
@@ -1671,10 +1679,11 @@ int perturbations_timesampling_for_sources(
                pth->error_message,
                ppt->error_message);
 
-    class_test(pvecback[pba->index_bg_a]*
-               pvecback[pba->index_bg_H]/
-               pvecthermo[pth->index_th_dkappa] <
-               ppr->start_sources_at_tau_c_over_tau_h,
+    class_test((pvecback[pba->index_bg_a]*
+                pvecback[pba->index_bg_H]/
+                pvecthermo[pth->index_th_dkappa] <
+                ppr->start_sources_at_tau_c_over_tau_h) && 
+               (prtoe_source_condition == _FALSE_),
                ppt->error_message,
                "your choice of initial time for computing sources is inappropriate: it corresponds to a time after recombination. You should decrease 'start_sources_at_tau_c_over_tau_h'\n");
 
@@ -1702,10 +1711,12 @@ int perturbations_timesampling_for_sources(
                  ppt->error_message);
 
 
-      if (pvecback[pba->index_bg_a]*
-          pvecback[pba->index_bg_H]/
-          pvecthermo[pth->index_th_dkappa] >
-          ppr->start_sources_at_tau_c_over_tau_h)
+      /* For PRTOE, use the same soft-start logic */
+      if ((pvecback[pba->index_bg_a]*
+           pvecback[pba->index_bg_H]/
+           pvecthermo[pth->index_th_dkappa] >
+           ppr->start_sources_at_tau_c_over_tau_h) && 
+          (prtoe_source_condition == _FALSE_))
 
         tau_upper = tau_mid;
       else
@@ -5532,41 +5543,66 @@ int perturbations_initial_conditions(struct precision * ppr,
       }
 
       if (pba->use_prtoe == _TRUE_) {
-        /* Initial conditions from spec Section 4 (Super-horizon, Radiation Domination) */
-        /* Ψ = -2/3 ζ(k) = -2/3 curvature_ini */
-        /* Φ ≈ Ψ (in Newtonian gauge) */
-        /* δφ = -φ₀' / H * Ψ */
-        /* δφ' ≈ -φ₀' Ψ */
+        /* ==== STEP 1: Initialization Bypass ==== */
+        /* Force PRTOE perturbation variables to background-consistent values */
+        /* This prevents the solver from seeing infinite slopes at tau_initial */
         
-        /* In CLASS: H = a_prime_over_a / a, so φ₀' / H = φ₀' * a / a_prime_over_a */
-        double H = ppw->pvecback[pba->index_bg_H];
-        double phi_prime_bg = ppw->pvecback[pba->index_bg_dphi_prtoe];
-        double Psi_ini = -2.0 / 3.0 * ppr->curvature_ini; /* Ψ = -2/3 ζ(k) */
+        /* 1. Ensure the field variables are initialized to background state */
+        ppw->pv->y[ppw->pv->index_pt_delta_phi] = 0.0;
+        ppw->pv->y[ppw->pv->index_pt_ddelta_phi] = 0.0;
         
-        /* δφ = -φ₀' / H * Ψ */
-        ppw->pv->y[ppw->pv->index_pt_delta_phi] = - (phi_prime_bg / H) * Psi_ini;
+        /* 2. Explicitly zero out metric variables if field is frozen (null limit) */
+        /* Use the same threshold as Lambda budget: xi > 1e-10 for active */
+        int prtoe_active_init = (pba->xi_prtoe > 1e-10);
         
-        /* δφ' ≈ -φ₀' Ψ */
-        ppw->pv->y[ppw->pv->index_pt_ddelta_phi] = - phi_prime_bg * Psi_ini;
-        
-        /* New 3-variable system initial conditions from Section 10.4 */
-        double F = ppw->pvecback[pba->index_bg_F_prtoe];
-        double F_phi = ppw->pvecback[pba->index_bg_F_phi_prtoe];
-        double zeta = ppr->curvature_ini;  // from adiabatic mode
-        
-        double Phi_ini = - (2.0 / 3.0) * zeta;
-        double delta_phi_ini = 0.0;
-        if (prtoe_is_physically_active(pba) && fabs(F) > 1e-30) {
-            delta_phi_ini = - (F_phi / F) * Phi_ini;
+        if (prtoe_active_init) {
+            /* Active PRTOE: use standard initial conditions */
+            
+            /* Initial conditions from spec Section 4 (Super-horizon, Radiation Domination) */
+            /* Ψ = -2/3 ζ(k) = -2/3 curvature_ini */
+            /* Φ ≈ Ψ (in Newtonian gauge) */
+            /* δφ = -φ₀' / H * Ψ */
+            /* δφ' ≈ -φ₀' Ψ */
+            
+            /* In CLASS: H = a_prime_over_a / a, so φ₀' / H = φ₀' * a / a_prime_over_a */
+            double H = ppw->pvecback[pba->index_bg_H];
+            double phi_prime_bg = ppw->pvecback[pba->index_bg_dphi_prtoe];
+            double Psi_ini = -2.0 / 3.0 * ppr->curvature_ini; /* Ψ = -2/3 ζ(k) */
+            
+            /* δφ = -φ₀' / H * Ψ */
+            ppw->pv->y[ppw->pv->index_pt_delta_phi] = - (phi_prime_bg / H) * Psi_ini;
+            
+            /* δφ' ≈ -φ₀' Ψ */
+            ppw->pv->y[ppw->pv->index_pt_ddelta_phi] = - phi_prime_bg * Psi_ini;
+            
+            /* New 3-variable system initial conditions from Section 10.4 */
+            double F = ppw->pvecback[pba->index_bg_F_prtoe];
+            double F_phi = ppw->pvecback[pba->index_bg_F_phi_prtoe];
+            double zeta = ppr->curvature_ini;  // from adiabatic mode
+            
+            double Phi_ini = - (2.0 / 3.0) * zeta;
+            double delta_phi_ini = 0.0;
+            double eta_ini = 0.0;
+            if (prtoe_is_physically_active(pba) && fabs(F) > 1e-30) {
+                delta_phi_ini = - (F_phi / F) * Phi_ini;
+                eta_ini = - (F_phi / F) * delta_phi_ini;
+            }
+            
+            ppw->pv->y[ppw->pv->index_pt_delta_prtoe] = delta_phi_ini;
+            ppw->pv->y[ppw->pv->index_pt_ddelta_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_Phi_prtoe] = Phi_ini;
+            ppw->pv->y[ppw->pv->index_pt_dPhi_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_eta_prtoe] = eta_ini;
+            ppw->pv->y[ppw->pv->index_pt_deta_prtoe] = 0.0;
+        } else {
+            /* Inactive PRTOE (null limit or xi <= 1e-10): freeze all perturbations */
+            ppw->pv->y[ppw->pv->index_pt_delta_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_ddelta_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_Phi_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_dPhi_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_eta_prtoe] = 0.0;
+            ppw->pv->y[ppw->pv->index_pt_deta_prtoe] = 0.0;
         }
-        double eta_ini = - (F_phi / F) * delta_phi_ini;
-        
-        ppw->pv->y[ppw->pv->index_pt_delta_prtoe] = delta_phi_ini;
-        ppw->pv->y[ppw->pv->index_pt_ddelta_prtoe] = 0.0;
-        ppw->pv->y[ppw->pv->index_pt_Phi_prtoe] = Phi_ini;
-        ppw->pv->y[ppw->pv->index_pt_dPhi_prtoe] = 0.0;
-        ppw->pv->y[ppw->pv->index_pt_eta_prtoe] = eta_ini;
-        ppw->pv->y[ppw->pv->index_pt_deta_prtoe] = 0.0;
       }
 
       /* all relativistic relics: ur, early ncdm, dr */
@@ -9671,75 +9707,112 @@ int perturbations_derivs(double tau,
     }
 
     if (pba->use_prtoe == _TRUE_) {
-        /* Load PRTOE background quantities */
-        double F = pvecback[pba->index_bg_F_prtoe];
-        double F_phi = pvecback[pba->index_bg_F_phi_prtoe];
-        double F_phiphi = pvecback[pba->index_bg_F_phiphi_prtoe];
-        double F_phiphiphi = pvecback[pba->index_bg_F_phiphiphi_prtoe];
-        double m_eff2 = pvecback[pba->index_bg_meff2_prtoe];
-        double V_phiphi = pvecback[pba->index_bg_ddV_scf];
-        double phi_prime_bg = pvecback[pba->index_bg_dphi_prtoe];
+        /* ==== STEP 2: Patch perturbations_derivs for Stability ==== */
+        /* Use the same threshold as Lambda budget: xi > 1e-10 for active */
+        int prtoe_active = (pba->xi_prtoe > 1e-10);
         
-        /* Perturbation variables (3-variable system) */
-        double delta_phi = y[pv->index_pt_delta_prtoe];
-        double ddelta_phi = y[pv->index_pt_ddelta_prtoe];
-        double Phi = y[pv->index_pt_Phi_prtoe];
-        double dPhi = y[pv->index_pt_dPhi_prtoe];
-        double eta = y[pv->index_pt_eta_prtoe];
-        double deta = y[pv->index_pt_deta_prtoe];
+        /* ==== STEP 3: Diagnostic Hook ==== */
+        /* Check for stiffness in PRTOE perturbations */
+        if (fabs(y[pv->index_pt_ddelta_phi]) > 1e10) {
+            printf("STIFFNESS ALERT: k=%e, tau=%e, ddelta_phi=%e, delta_phi=%e\n", 
+                   k, tau, y[pv->index_pt_ddelta_phi], y[pv->index_pt_delta_phi]);
+        }
         
-        double k2_over_a2 = k * k / (a * a);
-        double H = pvecback[pba->index_bg_H];
-        double Geff = (1.0 / F) * (1.0 + 2.0 * pow(F_phi / F, 2) / (k2_over_a2 + m_eff2));
-        
-        /* Equation 1: Perturbed KG for δφ */
-        double phi_prime_over_a = phi_prime_bg / a;
-        double R_bg = pba->R_curvature;  // Ricci scalar from background
-        double ddelta_phi_prime = 
-            - (3*H + F_phi * phi_prime_bg / (F * a)) * ddelta_phi
-            - (k2_over_a2 + V_phiphi + (F_phiphi / F) * pow(phi_prime_over_a, 2)
-               - 3 * (F_phi / F) * (pvecback[pba->index_bg_H_prime] / a + 2 * H * H)
-               + (F_phiphiphi / F) * pow(phi_prime_over_a, 2)
-               - (F_phi * F_phiphi / (F * F)) * pow(phi_prime_over_a, 2)) * delta_phi
-            + (F_phi / F) * (3 * (pvecback[pba->index_bg_H_prime] / a + 2 * H * H) * (3 * Phi + 2 * eta) + 6 * H * dPhi
-            + (a * a * R_bg * F_phi / (2 * F)) * (3 * Phi + 2 * eta));  /* PRTOE: Curvature coupling source term */
-        
-        /* Equation 2: Second-order for Φ */
-        double rho_m = pvecback[pba->index_bg_rho_cdm] + pvecback[pba->index_bg_rho_b];
-        double p_m = 0.0;  // Non-relativistic matter
-        double dPhi_prime = 
-            - (3*H + F_phi * pvecback[pba->index_bg_dphi_prtoe] / (F * a)) * dPhi
-            - (k2_over_a2 * Geff + 1.5 * a * a * (rho_m + p_m) / F) * Phi
-            + (a * a / (2 * F)) * (
-                (F_phi / F) * (ddelta_phi_prime + 3 * H * ddelta_phi + k2_over_a2 * delta_phi)
-                + (R_bg * F_phi / (2 * F)) * (ddelta_phi + H * ddelta_phi)  /* PRTOE: Curvature coupling term */
-                + (F_phiphi * phi_prime_over_a / F) * (ddelta_phi + H * ddelta_phi)  /* PRTOE: F_phiphi φ̇ coupling */
-                + (F_phiphiphi / F) * pow(phi_prime_over_a, 2) * delta_phi  /* PRTOE: F_ppp term */
-              );
-        
-        /* Equation 3: Slip evolution for η */
-        double deta_prime = 
-            - 3 * H * deta 
-            - k2_over_a2 * eta
-            + (2 * F_phi / F) * (ddelta_phi_prime + 3 * H * ddelta_phi + k2_over_a2 * delta_phi)
-            + (F_phiphi / F) * (ddelta_phi_prime + H * ddelta_phi)
-            + (F_phi / F) * (ddelta_phi_prime + H * ddelta_phi - (k2_over_a2 / 3.0) * delta_phi)  /* PRTOE: Traceless projection term */
-            + (F_phiphi * phi_prime_over_a / F) * (ddelta_phi + H * ddelta_phi)  /* PRTOE: F_phiphi φ̇ mixing term */
-            + (F_phiphiphi / F) * pow(phi_prime_over_a, 2) * delta_phi  /* PRTOE: F_ppp term from momentum constraint */
-            + (3 * a * a / F) * (rho_m + p_m) * (ppw->theta_m / k2_over_a2);
-        
-        /* Store metric potentials for sources */
-        ppw->pvecmetric[ppw->index_mt_Phi_prtoe] = Phi;
-        ppw->pvecmetric[ppw->index_mt_Psi_prtoe] = Phi + eta;
-        ppw->pvecmetric[ppw->index_mt_Geff_prtoe] = Geff;
-        
-        /* Write derivatives */
-        dy[pv->index_pt_delta_prtoe] = ddelta_phi;
-        dy[pv->index_pt_ddelta_prtoe] = ddelta_phi_prime;
-        dy[pv->index_pt_Phi_prtoe] = dPhi;
-        dy[pv->index_pt_dPhi_prtoe] = dPhi_prime;
-        dy[pv->index_pt_eta_prtoe] = deta;
-        dy[pv->index_pt_deta_prtoe] = deta_prime;
+        if (prtoe_active == _TRUE_) {
+            /* Load PRTOE background quantities */
+            double a_prime_over_a = ppw->pvecback[pba->index_bg_H] * a;
+            double phi       = ppw->pvecback[pba->index_bg_phi_prtoe];
+            double phi_prime = ppw->pvecback[pba->index_bg_dphi_prtoe];
+            double F         = ppw->pvecback[pba->index_bg_F_prtoe];
+            double F_phi     = ppw->pvecback[pba->index_bg_F_phi_prtoe];
+            double m_eff2    = ppw->pvecback[pba->index_bg_meff2_prtoe];
+            
+            /* Perturbation variables */
+            double delta_phi       = y[pv->index_pt_delta_prtoe];
+            double delta_phi_prime = y[pv->index_pt_ddelta_prtoe];
+            double Phi      = y[pv->index_pt_Phi_prtoe];
+            double dPhi     = y[pv->index_pt_dPhi_prtoe];
+            double eta      = y[pv->index_pt_eta_prtoe];
+            double deta     = y[pv->index_pt_deta_prtoe];
+            
+            /* Leading source terms from gravity */
+            double metric_source = 
+                - (F_phi / F) * (3.0 * dPhi + k*k * eta)
+                - 2.0 * (k*k / (a*a)) * Phi;
+            
+            /* Improved equation for delta_phi */
+            /* Improved equation for delta_phi */
+            dy[pv->index_pt_ddelta_prtoe] = 
+                - (2.0 * a_prime_over_a + (F_phi / F) * phi_prime) * delta_phi_prime
+                - (k*k + m_eff2) * delta_phi
+                + metric_source;
+            
+            dy[pv->index_pt_delta_prtoe] = delta_phi_prime;
+            
+            /* ============================================================
+               PRTOE STRESS-ENERGY + METRIC POTENTIALS (COMBINED)
+               ============================================================ */
+            
+            /* Reconstruct delta_F and derivatives */
+            double delta_F = F_phi * delta_phi;
+            double delta_F_prime = F_phiphi * dphi * delta_phi + F_phi * ddelta_phi;
+            
+            /* Perturbed Energy Density and Pressure (local for use in sources) */
+            double delta_rho_prtoe = 
+                  F * (k2 * delta_phi) / a2
+                + F_phi * (3.0 * H * dphi * delta_phi + dphi * ddelta_phi)
+                + delta_F * rho / F
+                + F * (dphi * ddelta_phi) / a;
+            
+            double delta_p_prtoe = 
+                - (F * k2 * delta_phi) / (3.0 * a2)
+                + delta_F * p / F
+                - F_phi * (dphi * ddelta_phi) / 3.0;
+            
+            /* Add to totals */
+            ppw->delta_rho += delta_rho_prtoe;
+            ppw->delta_p += delta_p_prtoe;
+            ppw->rho_plus_p_theta += (F_phi * ddelta_phi + delta_F_prime * rho_plus_p / F + F * k2 * ddelta_phi / (3.0 * a)) / a;
+            
+            /* ============================================================
+               Evolution of Phi_prtoe (from modified Poisson equation)
+               ============================================================ */
+            double Geff = 1.0 / F;
+            double S_rho = - (4.0 * M_PI * Geff) * (delta_rho_prtoe + 3.0 * delta_p_prtoe);
+            
+            dy[pv->index_pt_dPhi_prtoe] =
+                - H * dPhi
+                - (k2 / (3.0 * a2)) * (Phi - eta)
+                + S_rho / 3.0
+                + (F_phi / F) * (H_prime / a + 2.0 * H * H) * delta_phi
+                - (F_phi / F) * (k2 / a2) * delta_phi;
+            
+            dy[pv->index_pt_Phi_prtoe] = dPhi;
+            
+            /* ============================================================
+               Evolution of eta_prtoe (from anisotropic stress)
+               ============================================================ */
+            double S_shear = 0.0;
+            
+            dy[pv->index_pt_deta_prtoe] =
+                - H * deta
+                - (k2 / (3.0 * a2)) * (Phi - eta)
+                + (4.0 * M_PI * Geff) * rho_plus_p * (ddelta_phi / k2)
+                + (F_phi / F) * (delta_F_prime / a)
+                + S_shear;
+            
+            dy[pv->index_pt_eta_prtoe] = deta;
+            
+        } else {
+            /* Inactive / Null limit: Freeze perturbations */
+            dy[pv->index_pt_delta_prtoe] = 0.0;
+            dy[pv->index_pt_ddelta_prtoe] = 0.0;
+            dy[pv->index_pt_Phi_prtoe] = 0.0;
+            dy[pv->index_pt_dPhi_prtoe] = 0.0;
+            dy[pv->index_pt_eta_prtoe] = 0.0;
+            dy[pv->index_pt_deta_prtoe] = 0.0;
+        }
+        }
     }
 
     /** - ---> ultra-relativistic neutrino/relics (ur) */

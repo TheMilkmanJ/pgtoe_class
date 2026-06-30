@@ -159,16 +159,20 @@ let autoWatchdogEnabled = false;
 function updateToggleUI() {
     const toggle = document.getElementById('toggle-auto-watchdog');
     if (!toggle) return;
-    const handle = toggle.querySelector('.toggle-handle');
+    const label = toggle.closest('label') || toggle.parentElement;
+    if (!label) return;
+    const slider = label.querySelector('.slider');
+    const handle = label.querySelector('.toggle-handle');
     if (!handle) return;
     if (autoWatchdogEnabled) {
-        toggle.style.background = '#10ac84';
+        if (slider) slider.style.backgroundColor = '#10ac84';
         handle.style.left = '18px';
     } else {
-        toggle.style.background = 'rgba(255,255,255,0.15)';
+        if (slider) slider.style.backgroundColor = 'rgba(255,255,255,0.15)';
         handle.style.left = '2px';
     }
 }
+
 
 // Initial setup
 document.addEventListener('DOMContentLoaded', () => {

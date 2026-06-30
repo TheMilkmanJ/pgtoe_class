@@ -125,6 +125,7 @@ struct background
   double delta_prtoe;   /**< Gradient-density interaction delta; screened as delta/(1+phi^2) */
   double V0_prtoe;      /**< Potential amplitude V0; fixed to 0.685 from action */
   double zeta_prtoe;    /**< Vainshtein screening parameter zeta */
+  double Omega0_prtoe;  /**< Effective dark energy density from PRTOE field at a=1 */
   double M_prtoe;       /**< High-energy screening scale M */
   double alpha_prtoe;   /**< Interaction coupling alpha; screened as alpha^2/(1+phi^2) */
   double M_ew_prtoe;    /**< Electroweak scale M_EW (default 100 GeV in natural units) */
@@ -699,17 +700,17 @@ static inline int prtoe_is_physically_active(struct background *pba) {
     // 1. Hard gate: if user didn't ask for PRTOE, it is not active.
     if (pba->use_prtoe == _FALSE_) return _FALSE_;
     
-    // 2. Threshold check: if parameters are below tolerance, consider it null-limit.
-    double tol = 1.e-15; 
+    // 2. Threshold check: for null limit, we only check xi and beta
+    // The potential parameters (V0, m, lambda) can be large even in null limit
+    // as long as the coupling xi is small enough
+    // Use the same threshold as Lambda budget: 1e-10
+    double tol = 1.e-10; 
     if ((fabs(pba->xi_prtoe)     > tol) || 
-        (pba->V0_prtoe           > tol) || 
-        (pba->m_prtoe            > tol) || 
-        (fabs(pba->lambda_prtoe) > tol) || 
-        (pba->zeta_prtoe         > tol)) {
+        (fabs(pba->prtoe_beta)  > tol)) {
         return _TRUE_; 
     }
     
-    // 3. Default: inactive
+    // 3. Default: inactive (null limit)
     return _FALSE_;
 }
 

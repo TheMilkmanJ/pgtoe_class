@@ -3244,7 +3244,9 @@ int input_read_parameters_species(struct file_content * pfc,
   }
   /* Step 2 */
   if (pba->use_prtoe == _TRUE_) {
-    /* Leave custom PRTOE scalar field to naturally fill the expansion slot */
+    /* For PRTOE, we will handle the budget differently below */
+    /* Temporarily fill with Lambda, then transfer to PRTOE if active */
+    pba->Omega0_lambda= 1. - pba->Omega0_k - Omega_tot;
   }
   else if (flag1 == _FALSE_) {
     /* Fill with Lambda */
@@ -3462,24 +3464,35 @@ int input_read_parameters_species(struct file_content * pfc,
      *       No /H0 rescaling is applied here to avoid double-counting. */
 
     /* Allow smaller xi for null limit testing
-    class_test(pba->xi_prtoe > 1.2e-5 || pba->xi_prtoe < 1e-7,
+    * For null limit tests, xi can be very small (even 0)
+    * The strict DHOST Stability Wedge boundary is [1e-7, 1.2e-5] for active PRTOE
+    * but we allow xi < 1e-7 for null limit validation
+    class_test(pba->xi_prtoe > 1.2e-5,
                errmsg,
-               "PRTOE xi parameter %e exceeds the strict DHOST Stability Wedge boundary [1e-7, 1.2e-5]",
+               "PRTOE xi parameter %e exceeds the upper bound of the DHOST Stability Wedge [1e-7, 1.2e-5]",
                pba->xi_prtoe);
     */
 
-    pba->has_scf = _TRUE_;
-    /* Explicitly zero out Omega_Lambda to prevent double counting DE when PRTOE is physically active
-     * But keep it for null limit testing (all PRTOE parameters zero) */
-    int prtoe_active = _FALSE_;
-    if (fabs(pba->xi_prtoe)        > 1e-12) prtoe_active = _TRUE_;
-    if (pba->V0_prtoe              > 1e-200) prtoe_active = _TRUE_;
-    if (pba->m_prtoe               > 1e-80)  prtoe_active = _TRUE_;
-    if (fabs(pba->lambda_prtoe)    > 1e-12)  prtoe_active = _TRUE_;
-    
-    if (prtoe_active == _TRUE_) {
-        pba->Omega0_lambda = 0.0;
+    /* === PRTOE Dark Energy Normalization ===
+     * When PRTOE is active (xi > 1e-10), it replaces Lambda as the dark energy.
+     * For null limit tests (xi < 1e-10), keep Lambda.
+     */
+    if (pba->use_prtoe == _TRUE_ && pba->xi_prtoe > 1e-10) {
+        /* PRTOE is active → it provides the dark energy
+         * Set Omega0_prtoe from Omega0_lambda (or default to 0.7)
+         */
+        if (pba->Omega0_lambda > 0.0) {
+            pba->Omega0_prtoe = pba->Omega0_lambda;
+        } else {
+            pba->Omega0_prtoe = 0.7;  /* Default dark energy density */
+        }
+        pba->Omega0_lambda = 0.0;  /* Remove Lambda */
+        pba->has_lambda = _FALSE_;
+    } else {
+        /* Null limit or PRTOE off → use Lambda */
+        pba->Omega0_prtoe = 0.0;
     }
+    
     fprintf(stdout, " -> PRTOE Framework Activated (v1.0 Screened Model Bound Loaded)\n");
   }
 

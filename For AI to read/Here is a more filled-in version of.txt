@@ -1,0 +1,830 @@
+Updated 15 todos
+☐ Modify background_derivs() to set derivatives to zero when PRTOE not physically active (null limit)
+☐ Modify background_functions() to set safe values when PRTOE not physically active
+☐ Fix Lambda handling: allow Omega_Lambda when PRTOE in null limit mode
+☐ Force clean rebuild of CLASS + reinstall classy
+☐ Test: PRTOE with active parameters works
+☐ Test: Null limit (all PRTOE params=0) recovers LambdaCDM
+☐ Create helper function load_class_background() for validation scripts
+☐ Update run_prtoe_validation.py to use real CLASS background data
+☐ Update stability_mapper.py with real data loading and configurable grid
+☐ Add tensor speed check to DHOST validation module
+☐ Implement perturbation indices and quasi-static approximation
+
+
+
+
+Part K: Quasi-Static Growth Equation Solver
+Here is a clean implementation of the modified growth equation using the quasi-static $  G_{\rm eff}  $.
+Python Version (Recommended)
+PythonCopyimport numpy as np
+from scipy.integrate import solve_ivp
+
+def growth_equation_quasistatic(a, y, cosmo_params, prtoe_params):
+    """
+    Quasi-static growth equation:
+    D'' + (2 + H'/H) D' - (3/2) Omega_m(a) * (G_eff/G) * D = 0
+    """
+    D, dD_da = y
+    
+    a = max(a, 1e-6)
+    H = cosmo_params['H0'] * np.sqrt(cosmo_params['Omega_m']/a**3 + cosmo_params['Omega_L'])
+    
+    # Get background quantities (you would pull these from CLASS or your background module)
+    F = prtoe_params['F']
+    F_phi = prtoe_params['F_phi']
+    m_eff2 = prtoe_params['m_eff2']
+    
+    k = prtoe_params.get('k', 0.1)  # h/Mpc
+    
+    # Compute G_eff
+    k2_over_a2 = (k / a)**2
+    denom = k2_over_a2 + m_eff2
+    Geff_over_G = (1.0 / F) * (1.0 + 2.0 * (F_phi / F)**2 / denom)
+    
+    Omega_m_a = cosmo_params['Omega_m'] / (a**3 * (cosmo_params['Omega_m']/a**3 + cosmo_params['Omega_L']))
+    
+    # Growth equation
+    d2D_da2 = - (2 + cosmo_params.get('H_prime_over_H', 0)) * dD_da \
+              + (3.0/2.0) * Omega_m_a * Geff_over_G * D
+    
+    return [dD_da, d2D_da2]
+
+
+def solve_growth_quasistatic(cosmo_params, prtoe_params, a_span=(1e-3, 1.0)):
+    """Solve for the growth factor D(a) in quasi-static approximation."""
+    y0 = [1e-5, 1e-5]  # Initial conditions at early time
+    sol = solve_ivp(
+        growth_equation_quasistatic,
+        a_span,
+        y0,
+        args=(cosmo_params, prtoe_params),
+        dense_output=True,
+        rtol=1e-6
+    )
+    return sol.t, sol.y[0]
+Usage Example
+PythonCopycosmo = {'H0': 70, 'Omega_m': 0.3, 'Omega_L': 0.7}
+prtoe = {'F': 1.02, 'F_phi': 0.015, 'm_eff2': 5e-7, 'k': 0.1}
+
+a, D = solve_growth_quasistatic(cosmo, prtoe)
+print("Growth factor at a=1:", D[-1])
+
+Part L: Integration into stability_mapper.py
+Here is how to integrate the quasi-static functions into your existing stability mapper.
+Recommended Addition to stability_mapper.py
+Add these functions near the top:
+PythonCopydef compute_quasistatic_metrics(xi, zeta, phi_c, delta_phi, k=0.1, a=1.0):
+    """Compute Geff and eta for a given parameter set at a given scale/time."""
+    # You would normally get F, F_phi, m_eff2 from your background module
+    # For now, placeholder (replace with real call to CLASS or your C background)
+    F = 1.0 + xi * 0.5 * (1 + np.tanh((0.5 - phi_c)/delta_phi)) * (0.5**2 / (1 + zeta*0.25))
+    F_phi = xi * 0.01   # Approximate
+    m_eff2 = 1e-6       # Placeholder - pull from your stability calculation
+    
+    k2_over_a2 = (k / a)**2
+    denom = k2_over_a2 + m_eff2
+    
+    Geff = (1.0 / F) * (1.0 + 2.0 * (F_phi / F)**2 / denom)
+    eta = 1.0 + 2.0 * (F_phi / F)**2 / denom
+    
+    return Geff, eta
+Then inside your main loop in stability_mapper.py, add:
+PythonCopy# After computing stability quantities...
+Geff, eta = compute_quasistatic_metrics(xi, zeta, phi_c, delta_phi)
+
+results.append({
+    'xi': xi,
+    'zeta': zeta,
+    'phi_c': phi_c,
+    'delta_phi': delta_phi,
+    'stable': stable,
+    'Geff': Geff,
+    'eta': eta
+})
+You can then save Geff and eta maps alongside your stability maps.
+
+Summary of What You Now Have
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ComponentStatusLocationBackground with smooth suppressionReadyPart J (previous)Quasi-static Geff + etaReadyPart I + KGrowth equation solverReadyPart KIntegration into stability mapperReadyPart L
+
+
+1. Full Quasi-Static Power Spectrum Modification
+Here is a practical implementation to compute the modified linear matter power spectrum in the quasi-static approximation.
+Python Function
+PythonCopyimport numpy as np
+from scipy.interpolate import interp1d
+
+def compute_modified_power_spectrum(
+    k_array,
+    z,
+    P_lcdm,                    # Base LambdaCDM power spectrum P(k) at redshift z
+    cosmo_params,
+    prtoe_params,
+    growth_lcdm=None         # Optional: precomputed LCDM growth factor
+):
+    """
+    Compute modified matter power spectrum in quasi-static approximation.
+    
+    P_PRTOE(k, z) ≈ P_ΛCDM(k, z) * (D_PRTOE(k, z) / D_ΛCDM(z))^2 * (G_eff(k, z) / G)^2
+    """
+    a = 1.0 / (1.0 + z)
+    
+    # Solve growth in quasi-static limit
+    a_vals, D_prtoe = solve_growth_quasistatic(cosmo_params, prtoe_params)
+    
+    # Growth factor at desired redshift
+    D_prtoe_z = np.interp(a, a_vals, D_prtoe)
+    
+    if growth_lcdm is None:
+        # Simple approximation if not provided
+        D_lcdm_z = a  # normalized at early times
+    else:
+        D_lcdm_z = np.interp(a, growth_lcdm['a'], growth_lcdm['D'])
+    
+    growth_ratio = (D_prtoe_z / D_lcdm_z)**2
+    
+    # Compute G_eff at each k
+    Geff_array = np.zeros_like(k_array)
+    for i, k in enumerate(k_array):
+        result = compute_prtoe_quasistatic(
+            k=k,
+            a=a,
+            F=prtoe_params['F'],
+            F_phi=prtoe_params['F_phi'],
+            m_eff2=prtoe_params['m_eff2'],
+            H=cosmo_params['H0'] * np.sqrt(cosmo_params['Omega_m']/a**3 + cosmo_params['Omega_L']),
+            Omega_m=cosmo_params['Omega_m']
+        )
+        Geff_array[i] = result['Geff_over_G']
+    
+    # Modified power spectrum
+    P_modified = P_lcdm * growth_ratio * (Geff_array)**2
+    
+    return P_modified, Geff_array, growth_ratio
+Usage Example
+PythonCopyk = np.logspace(-3, 1, 200)
+P_lcdm = ...  # your LambdaCDM P(k) at z=0
+
+P_prtoe, Geff_k, growth_ratio = compute_modified_power_spectrum(
+    k_array=k,
+    z=0.0,
+    P_lcdm=P_lcdm,
+    cosmo_params=cosmo,
+    prtoe_params=prtoe
+)
+This gives you the modified linear power spectrum including both growth and scale-dependent $  G_{\rm eff}  $.
+
+2. Adding Metrics to Your Validation Dashboard
+Here is how to integrate Geff, eta, and the modified growth into your CosmicDashboard or validation scripts.
+Recommended Addition
+Add a new method or section in your dashboard/validation code:
+PythonCopydef add_prtoe_quasistatic_metrics(self, xi, zeta, phi_c, delta_phi, k_values=[0.01, 0.1, 1.0]):
+    """Add quasi-static diagnostics to the dashboard."""
+    
+    metrics = {}
+    
+    for k in k_values:
+        Geff, eta = compute_quasistatic_metrics(xi, zeta, phi_c, delta_phi, k=k)
+        metrics[f'Geff_k{k}'] = Geff
+        metrics[f'eta_k{k}'] = eta
+    
+    # Also compute growth modification at z=0
+    cosmo = {'H0': 70, 'Omega_m': 0.3, 'Omega_L': 0.7}
+    prtoe = {
+        'F': 1.0 + xi * ...,   # compute from your functions
+        'F_phi': ...,
+        'm_eff2': ...,
+        'k': 0.1
+    }
+    
+    a, D = solve_growth_quasistatic(cosmo, prtoe)
+    metrics['D_a1'] = D[-1]           # Growth factor at z=0
+    metrics['growth_ratio'] = D[-1] / 1.0   # relative to LCDM (normalize properly)
+    
+    return metrics
+Then call it inside your stability/validation loop and save the results:
+PythonCopymetrics = self.add_prtoe_quasistatic_metrics(xi, zeta, phi_c, delta_phi)
+row.update(metrics)   # add to your results dataframe
+This way your VALIDATION_RESULTS.md or dashboard plots can include:
+
+Scale-dependent $  G_{\rm eff}(k)  $
+Gravitational slip $  \eta(k)  $
+Modified growth factor at z=0
+Modified power spectrum (if you compute it)
+
+1. Connecting Quasi-Static Tools Directly to CLASS Output
+Here is how to make your quasi-static analysis pipeline use real data from CLASS.
+A. Run CLASS with PRTOE and Extract Background Quantities
+PythonCopyimport classy
+import numpy as np
+
+def get_prtoe_background_from_class(params):
+    """Run CLASS with PRTOE and extract key background quantities."""
+    cosmo = classy.Class()
+    cosmo.set(params)
+    cosmo.compute()
+    
+    # Get background quantities at multiple scale factors
+    background = cosmo.get_background()
+    
+    a = background['a']
+    H = background['H [1/Mpc]']
+    
+    # You need to expose these in CLASS (we added the indices earlier)
+    # For now, assume you have added them to the output
+    F = background.get('F_prtoe', np.ones_like(a))
+    F_phi = background.get('F_phi_prtoe', np.zeros_like(a))
+    m_eff2 = background.get('m_eff2_prtoe', np.ones_like(a) * 1e-6)
+    
+    return {
+        'a': a,
+        'H': H,
+        'F': F,
+        'F_phi': F_phi,
+        'm_eff2': m_eff2,
+        'cosmo': cosmo
+    }
+B. Use Real CLASS Background in Quasi-Static Functions
+Modify your earlier functions to accept CLASS output:
+PythonCopydef compute_modified_power_spectrum_from_class(
+    k_array, z, P_lcdm, class_params, prtoe_params
+):
+    bg = get_prtoe_background_from_class(class_params)
+    
+    # Interpolate background quantities at desired redshift
+    a = 1.0 / (1.0 + z)
+    
+    F = np.interp(a, bg['a'], bg['F'])
+    F_phi = np.interp(a, bg['a'], bg['F_phi'])
+    m_eff2 = np.interp(a, bg['a'], bg['m_eff2'])
+    H = np.interp(a, bg['a'], bg['H'])
+    
+    # Now call the quasi-static functions with real values
+    result = compute_prtoe_quasistatic(
+        k=k_array,
+        a=a,
+        F=F,
+        F_phi=F_phi,
+        m_eff2=m_eff2,
+        H=H,
+        Omega_m=class_params.get('Omega_cdm', 0.27) + class_params.get('Omega_b', 0.05)
+    )
+    
+    # Then proceed with growth solver and power spectrum modification...
+    return P_modified
+This way your Geff, eta, growth, and modified $  P(k)  $ are computed using the actual background evolution from your PRTOE implementation in CLASS.
+
+2. Moving Toward Full Time-Dependent Perturbation Implementation
+Here is a realistic, phased plan to implement the full scalar perturbations in perturbations.c.
+Recommended Phased Approach
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+PhaseGoalDifficultyTime EstimatePriority1Add flags + indices + basic memoryEasy1 dayHigh2Implement quasi-static version firstMedium2–3 daysHighest3Add full perturbed Klein-GordonHard4–6 daysMedium4Add modified Einstein constraintsHard5–7 daysMedium5Add dynamical equations for Φ + slipVery Hard7–10 daysLow6Add sources + validation against ΛCDMHard4–6 daysMedium
+Starting Skeleton for perturbations.c (Phase 1 + 2)
+CCopy/* In perturbations_indices() */
+if (pba->has_prtoe == _TRUE_) {
+    ppt->index_pt_delta_prtoe   = index_pt; index_pt++;
+    ppt->index_pt_ddelta_prtoe  = index_pt; index_pt++;
+    ppt->index_pt_Phi_prtoe     = index_pt; index_pt++;
+}
+
+/* In perturbations_derivs() - Quasi-static first version */
+if (pba->has_prtoe == _TRUE_) {
+    double delta_phi  = y[ppw->pv->index_pt_delta_prtoe];
+    double ddelta_phi = y[ppw->pv->index_pt_ddelta_prtoe];
+    double Phi        = y[ppw->pv->index_pt_Phi_prtoe];
+
+    double F      = pvecback[pba->index_bg_F_prtoe];
+    double F_phi  = pvecback[pba->index_bg_F_phi_prtoe];
+    double m2     = pvecback[pba->index_bg_meff2_prtoe];
+
+    double k2_over_a2 = k*k / (a*a);
+    double denom = k2_over_a2 + m2;
+
+    double Geff = (1.0 / F) * (1.0 + 2.0 * pow(F_phi/F, 2) / denom);
+
+    // Simple quasi-static evolution for demonstration
+    double ddelta_phi_prime = -3.0*H*ddelta_phi - (k2_over_a2 + m2)*delta_phi;
+
+    double Phi_prime = -H*Phi - (rho_m_delta_matter / (2.0*F*k2_over_a2));
+
+    dy[...] = ddelta_phi;
+    dy[...] = ddelta_phi_prime;
+    dy[...] = Phi_prime;
+}
+
+
+O. Exposing New Background Quantities for Python (get_background())
+To make quantities like F_prtoe, F_phi_prtoe, m_eff2_prtoe, K_prtoe, Q_prtoe, etc. cleanly available via cosmo.get_background() in Python, you need to ensure they are properly indexed and computed.
+Step 1: Confirm Indices Are Defined
+In background.h, make sure you have these lines (you already added most of them):
+Cint index_bg_F_prtoe;           /* F(φ) */
+int index_bg_F_phi_prtoe;       /* dF/dφ */
+int index_bg_F_phiphi_prtoe;    /* d²F/dφ² */
+int index_bg_meff2_prtoe;       /* Effective mass squared */
+int index_bg_K_prtoe;           /* Kinetic coefficient */
+int index_bg_Q_prtoe;           /* Gradient stability coefficient */
+int index_bg_cT2_prtoe;         /* Tensor speed squared */
+int index_bg_rho_prtoe;         /* PRTOE energy density */
+int index_bg_p_prtoe;           /* PRTOE pressure */
+int index_bg_phi_prtoe;         /* φ */
+int index_bg_dphi_prtoe;        /* φ' (conformal) */
+Step 2: Ensure They Are Computed in background_functions()
+Your current code already computes most of them inside the if (pba->use_prtoe == _TRUE_) block. Just make sure the assignments are outside the early-time suppression if (trans > 0.5) block when possible, or at least set safe default values when the field is frozen.
+Add this at the end of the PRTOE block (even in frozen regime):
+Cpvecback[pba->index_bg_F_prtoe]       = F;
+pvecback[pba->index_bg_F_phi_prtoe]   = F_phi;
+pvecback[pba->index_bg_F_phiphi_prtoe] = F_phiphi;
+pvecback[pba->index_bg_meff2_prtoe]   = meff2;
+pvecback[pba->index_bg_K_prtoe]       = K;
+pvecback[pba->index_bg_Q_prtoe]       = Q;
+pvecback[pba->index_bg_cT2_prtoe]     = 1.0;
+Step 3: Make Them Available in get_background() (Python)
+In CLASS, any quantity stored in pvecback with a proper index_bg_* is automatically exposed via cosmo.get_background().
+You just need to make sure the indices are registered in background_indices():
+Cclass_define_index(pba->index_bg_F_prtoe,        pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_phi_prtoe,    pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_meff2_prtoe,    pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_K_prtoe,        pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_Q_prtoe,        pba->use_prtoe, index_bg, 1);
+// etc.
+Step 4: Python Usage (Clean Access)
+Once the above is done, you can do:
+Pythonbg = cosmo.get_background()
+print(bg['F_prtoe'])        # array over time
+print(bg['m_eff2_prtoe'])
+print(bg['K_prtoe'])
+print(bg['Q_prtoe'])
+This is the cleanest way. No need to modify output titles unless you also want them in text files.
+
+P. Expanding perturbations.c — Constraint Equations + Source Terms
+Here is the next concrete expansion of the perturbation module.
+1. Modified Einstein Constraints (Quasi-Static First)
+Add this block inside perturbations_derivs() after the PRTOE variables are loaded:
+Cif (pba->has_prtoe == _TRUE_) {
+
+    double delta_phi  = y[ppw->pv->index_pt_delta_prtoe];
+    double ddelta_phi = y[ppw->pv->index_pt_ddelta_prtoe];
+    double Phi        = y[ppw->pv->index_pt_Phi_prtoe];
+
+    double F      = pvecback[pba->index_bg_F_prtoe];
+    double F_phi  = pvecback[pba->index_bg_F_phi_prtoe];
+    double m2     = pvecback[pba->index_bg_meff2_prtoe];
+
+    double k2_over_a2 = k*k / (a*a);
+    double denom = k2_over_a2 + m2;
+
+    /* Effective G and slip (quasi-static) */
+    double Geff = (1.0 / F) * (1.0 + 2.0 * pow(F_phi / F, 2) / denom);
+    double eta  = 1.0 + 2.0 * pow(F_phi / F, 2) / denom;
+
+    /* Modified Poisson constraint (0,0) */
+    double rho_m_delta = ...;   // matter density perturbation from other species
+    double Phi_prime = - H * Phi 
+                       - (rho_m_delta + F_phi * delta_phi * k2_over_a2) / (2.0 * F * k2_over_a2);
+
+    /* Slip relation → get Psi */
+    double Psi = Phi - (F_phi / F) * delta_phi;
+
+    /* Store for source terms */
+    ppw->pvecmetric[ppw->index_mt_Phi_prtoe] = Phi;
+    ppw->pvecmetric[ppw->index_mt_Psi_prtoe] = Psi;
+}
+2. Source Term Modifications (perturb_sources())
+In perturb_sources(), add contributions from PRTOE to the CMB and matter sources:
+Cif (pba->has_prtoe == _TRUE_) {
+
+    double Phi = ppw->pvecmetric[...];
+    double Psi = ppw->pvecmetric[...];
+    double delta_phi = y[ppw->pv->index_pt_delta_prtoe];
+
+    /* ISW effect modification */
+    if (index_tp_t > 0) {
+        sources[index_tp_t] += 2.0 * (Phi_prime + Psi_prime);  // modified ISW
+    }
+
+    /* Lensing potential */
+    if (index_tp_p > 0) {
+        sources[index_tp_p] += (Phi + Psi);   // modified lensing
+    }
+
+    /* Matter density source (for P(k)) */
+    if (index_tp_m > 0) {
+        sources[index_tp_m] += Geff * delta_m;  // effective G modification
+    }
+}
+
+
+Q. Full Registration of PRTOE Background Indices + Output Titles
+1. Register Indices in background_indices()
+Add this block inside the function background_indices() (usually near other class_define_index calls):
+C/** PRTOE background quantities */
+class_define_index(pba->index_bg_F_prtoe,         pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_phi_prtoe,     pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_phiphi_prtoe,  pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_meff2_prtoe,     pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_K_prtoe,         pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_Q_prtoe,         pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_cT2_prtoe,       pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_rho_prtoe,       pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_p_prtoe,         pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_phi_prtoe,       pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_dphi_prtoe,      pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_ddphi_prtoe,     pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_dot_prtoe,     pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_ddot_prtoe,    pba->use_prtoe, index_bg, 1);
+2. Add Output Titles in background_output_titles()
+Add these lines inside background_output_titles():
+Cclass_store_columntitle(titles,"(.)rho_prtoe",     pba->use_prtoe);
+class_store_columntitle(titles,"(.)p_prtoe",       pba->use_prtoe);
+class_store_columntitle(titles,"F_prtoe",          pba->use_prtoe);
+class_store_columntitle(titles,"F'_prtoe",         pba->use_prtoe);
+class_store_columntitle(titles,"F''_prtoe",        pba->use_prtoe);
+class_store_columntitle(titles,"m_eff2_prtoe",     pba->use_prtoe);
+class_store_columntitle(titles,"K_prtoe",          pba->use_prtoe);
+class_store_columntitle(titles,"Q_prtoe",          pba->use_prtoe);
+class_store_columntitle(titles,"cT2_prtoe",        pba->use_prtoe);
+class_store_columntitle(titles,"phi_prtoe",        pba->use_prtoe);
+class_store_columntitle(titles,"phi'_prtoe",       pba->use_prtoe);
+3. Write the Data in background_output_data()
+Add the corresponding storage calls inside the loop in background_output_data():
+Cclass_store_double(dataptr, pvecback[pba->index_bg_rho_prtoe],     pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_p_prtoe],       pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_F_prtoe],       pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_F_phi_prtoe],   pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_F_phiphi_prtoe],pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_meff2_prtoe],   pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_K_prtoe],       pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_Q_prtoe],       pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_cT2_prtoe],     pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_phi_prtoe],     pba->use_prtoe, storeidx);
+class_store_double(dataptr, pvecback[pba->index_bg_dphi_prtoe],    pba->use_prtoe, storeidx);
+After these changes, all PRTOE background quantities will be cleanly available via cosmo.get_background() in Python.
+
+R. More Complete perturbations_derivs() Block
+Here is a significantly expanded version of the PRTOE block inside perturbations_derivs():
+Cif (pba->has_prtoe == _TRUE_) {
+
+    /* === Load PRTOE background quantities === */
+    double F        = pvecback[pba->index_bg_F_prtoe];
+    double F_phi    = pvecback[pba->index_bg_F_phi_prtoe];
+    double F_phiphi = pvecback[pba->index_bg_F_phiphi_prtoe];
+    double m_eff2   = pvecback[pba->index_bg_meff2_prtoe];
+    double K_coeff  = pvecback[pba->index_bg_K_prtoe];
+    double Q_coeff  = pvecback[pba->index_bg_Q_prtoe];
+
+    /* === Perturbation variables === */
+    double delta_phi   = y[ppw->pv->index_pt_delta_prtoe];
+    double ddelta_phi  = y[ppw->pv->index_pt_ddelta_prtoe];
+    double Phi         = y[ppw->pv->index_pt_Phi_prtoe];
+
+    double k2_over_a2 = k*k / (a*a);
+    double denom = k2_over_a2 + m_eff2;
+
+    /* === Quasi-static effective quantities === */
+    double Geff_over_G = (1.0 / F) * (1.0 + 2.0 * pow(F_phi / F, 2) / denom);
+    double eta         = 1.0 + 2.0 * pow(F_phi / F, 2) / denom;
+
+    /* === Modified Poisson constraint (0,0) === */
+    double rho_m_delta = ppw->delta_m;   // or compute from matter species
+    double source_term = F_phi * delta_phi * (3.0 * (H*H + H_prime/a));
+
+    double Phi_prime = -H * Phi 
+                       - (rho_m_delta + source_term) / (2.0 * F * k2_over_a2);
+
+    /* === Slip relation: get Psi from Phi and delta_phi === */
+    double Psi = Phi - (F_phi / F) * delta_phi;
+
+    /* === Perturbed Klein-Gordon (quasi-static simplified version) === */
+    double ddelta_phi_prime = 
+        - (3.0*H + F_phi * pvecback[pba->index_bg_dphi_prtoe]/F / a) * ddelta_phi
+        - (k2_over_a2 + m_eff2) * delta_phi
+        + (F_phi / F) * 3.0 * (H_prime/a + 2.0*H*H) * (3.0*Psi + 2.0*Phi);
+
+    /* === Store metric potentials for source terms === */
+    ppw->pvecmetric[ppw->index_mt_Phi_prtoe] = Phi;
+    ppw->pvecmetric[ppw->index_mt_Psi_prtoe] = Psi;
+    ppw->pvecmetric[ppw->index_mt_Geff_prtoe] = Geff_over_G;   // useful for sources
+
+    /* === Write derivatives === */
+    dy[ppw->pv->index_pt_delta_prtoe]  = ddelta_phi;
+    dy[ppw->pv->index_pt_ddelta_prtoe] = ddelta_phi_prime;
+    dy[ppw->pv->index_pt_Phi_prtoe]    = Phi_prime;
+}
+
+
+
+
+T. Null Limit Freezing Logic in background_derivs()
+This is the cleanest way to fix the Omega_r ≈ 3 issue and make the null limit test work reliably.
+Recommended Implementation
+Add this structure in background_derivs():
+Cif (pba->use_prtoe == _TRUE_) {
+
+    if (prtoe_is_physically_active(pba)) {
+
+        /* === Normal PRTOE evolution (when xi, V0, m, etc. are non-zero) === */
+        double a = exp(loga);
+        double phi = y[pba->index_bi_phi_prtoe];
+        double dphi = y[pba->index_bi_dphi_prtoe];
+
+        /* ... your existing PRTOE evolution code (KG, F derivatives, etc.) ... */
+
+        double effective_activation = screening_factor * trans;
+        dy[pba->index_bi_phi_prtoe]  = (dphi / a / MAX(H, 1e-20)) * effective_activation;
+        dy[pba->index_bi_dphi_prtoe] = phi_primeprime * effective_activation;
+
+    } else {
+
+        /* === NULL LIMIT: Completely freeze the PRTOE field === */
+        dy[pba->index_bi_phi_prtoe]  = 0.0;
+        dy[pba->index_bi_dphi_prtoe] = 0.0;
+
+        /* Also set safe background values so nothing breaks downstream */
+        pvecback[pba->index_bg_F_prtoe]       = 1.0;
+        pvecback[pba->index_bg_F_phi_prtoe]   = 0.0;
+        pvecback[pba->index_bg_F_phiphi_prtoe] = 0.0;
+        pvecback[pba->index_bg_meff2_prtoe]   = 1e-6;   // safe positive value
+        pvecback[pba->index_bg_K_prtoe]       = 1.0;
+        pvecback[pba->index_bg_Q_prtoe]       = 1.0;
+        pvecback[pba->index_bg_rho_prtoe]     = 0.0;
+        pvecback[pba->index_bg_p_prtoe]       = 0.0;
+    }
+}
+Also Update background_functions() for Consistency
+Add a similar guard:
+Cif (pba->use_prtoe == _TRUE_ && prtoe_is_physically_active(pba)) {
+    /* Full PRTOE computation */
+    ...
+} else if (pba->use_prtoe == _TRUE_) {
+    /* Null limit: set safe defaults */
+    pvecback[pba->index_bg_F_prtoe]       = 1.0;
+    pvecback[pba->index_bg_F_phi_prtoe]   = 0.0;
+    pvecback[pba->index_bg_meff2_prtoe]   = 1e-6;
+    pvecback[pba->index_bg_rho_prtoe]     = 0.0;
+    pvecback[pba->index_bg_p_prtoe]       = 0.0;
+}
+With this logic, when you run the null limit test (xi=0, V0=0, m=0, ...), the field is completely frozen, Lambda is kept, and Omega_r should return to ~1 at early times.
+
+S. Full perturb_sources() Implementation with PRTOE
+Here is a complete block you can insert into perturb_sources():
+Cif (pba->has_prtoe == _TRUE_) {
+
+    double Phi = ppw->pvecmetric[ppw->index_mt_Phi_prtoe];
+    double Psi = ppw->pvecmetric[ppw->index_mt_Psi_prtoe];
+    double Geff = ppw->pvecmetric[ppw->index_mt_Geff_prtoe];   // from perturbations_derivs
+
+    double delta_phi = y[ppw->pv->index_pt_delta_prtoe];
+
+    /* === Temperature source (includes modified ISW) === */
+    if (index_tp_t > 0) {
+        /* Standard ISW + PRTOE correction */
+        double ISW = 2.0 * (Phi_prime + Psi_prime);
+        sources[index_tp_t] += ISW;
+
+        /* Extra contribution from scalar field perturbation (optional but useful) */
+        sources[index_tp_t] += 2.0 * (F_phi / F) * delta_phi_prime;   // if you track delta_phi_prime
+    }
+
+    /* === Polarization source === */
+    if (index_tp_p > 0) {
+        sources[index_tp_p] += (Phi + Psi);   // modified lensing potential
+    }
+
+    /* === Lensing potential source === */
+    if (index_tp_l > 0) {
+        sources[index_tp_l] += (Phi + Psi) * (1.0 + (Geff - 1.0));   // approximate modification
+    }
+
+    /* === Matter density and velocity sources (for P(k) and growth) === */
+    if (index_tp_m > 0) {
+        /* Modified growth source */
+        sources[index_tp_m] += Geff * delta_m;     // delta_m from matter
+    }
+
+    if (index_tp_v > 0) {
+        sources[index_tp_v] += Geff * theta_m;     // velocity divergence
+    }
+}
+
+Notes on This Implementation
+
+Phi_prime and Psi_prime should be computed or stored earlier in the perturbation evolution.
+The term involving delta_phi_prime is optional and can be dropped in the first version.
+The lensing modification using Geff is approximate — for more accuracy you can use the full slip η.
+
+
+
+
+1. Helper Function (prtoe_is_physically_active)
+Add this function in background.c:
+C/** Returns _TRUE_ only if PRTOE is physically active (not in null limit) */
+int prtoe_is_physically_active(struct background *pba)
+{
+    if (pba->use_prtoe == _FALSE_) return _FALSE_;
+
+    if (fabs(pba->xi_prtoe)     > 1e-12) return _TRUE_;
+    if (pba->V0_prtoe           > 1e-200) return _TRUE_;
+    if (pba->m_prtoe            > 1e-80)  return _TRUE_;
+    if (fabs(pba->lambda_prtoe) > 1e-12)  return _TRUE_;
+
+    return _FALSE_;
+}
+
+2. Index Registration (Reminder)
+Make sure these are in background_indices():
+Cclass_define_index(pba->index_bi_phi_prtoe,     pba->use_prtoe, index_bi, 1);
+class_define_index(pba->index_bi_dphi_prtoe,    pba->use_prtoe, index_bi, 1);
+
+class_define_index(pba->index_bg_F_prtoe,       pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_F_phi_prtoe,   pba->use_prtoe, index_bg, 1);
+class_define_index(pba->index_bg_meff2_prtoe,   pba->use_prtoe, index_bg, 1);
+// add the rest as shown in previous response (Q)
+Also add the corresponding indices in perturbations.h / perturbations_indices() for the perturbation variables.
+
+3. background_derivs() — Null Limit Freezing
+Replace / wrap your current PRTOE evolution with this structure:
+Cif (pba->use_prtoe == _TRUE_) {
+
+    if (prtoe_is_physically_active(pba)) {
+
+        /* === Full PRTOE evolution === */
+        double a = exp(loga);
+        double phi = y[pba->index_bi_phi_prtoe];
+        double dphi = y[pba->index_bi_dphi_prtoe];
+
+        /* ... your existing KG + F evolution code ... */
+
+        double effective_activation = screening_factor * trans;
+        dy[pba->index_bi_phi_prtoe]  = (dphi / a / MAX(H, 1e-20)) * effective_activation;
+        dy[pba->index_bi_dphi_prtoe] = phi_primeprime * effective_activation;
+
+    } else {
+
+        /* === NULL LIMIT: Freeze the field completely === */
+        dy[pba->index_bi_phi_prtoe]  = 0.0;
+        dy[pba->index_bi_dphi_prtoe] = 0.0;
+    }
+}
+
+4. perturbations_derivs() — Complete PRTOE Block (Quasi-Static)
+Insert this inside perturbations_derivs():
+Cif (pba->has_prtoe == _TRUE_) {
+
+    /* Load background quantities */
+    double F        = pvecback[pba->index_bg_F_prtoe];
+    double F_phi    = pvecback[pba->index_bg_F_phi_prtoe];
+    double F_phiphi = pvecback[pba->index_bg_F_phiphi_prtoe];
+    double m_eff2   = pvecback[pba->index_bg_meff2_prtoe];
+
+    /* Perturbation variables */
+    double delta_phi  = y[ppw->pv->index_pt_delta_prtoe];
+    double ddelta_phi = y[ppw->pv->index_pt_ddelta_prtoe];
+    double Phi        = y[ppw->pv->index_pt_Phi_prtoe];
+
+    double k2_over_a2 = k*k / (a*a);
+    double denom = k2_over_a2 + m_eff2;
+
+    /* Quasi-static effective quantities */
+    double Geff = (1.0 / F) * (1.0 + 2.0 * pow(F_phi / F, 2) / denom);
+    double eta  = 1.0 + 2.0 * pow(F_phi / F, 2) / denom;
+
+    /* Modified Poisson constraint */
+    double rho_m_delta = ppw->delta_m;
+    double Phi_prime = -H * Phi 
+                       - (rho_m_delta + F_phi * delta_phi * k2_over_a2) 
+                         / (2.0 * F * k2_over_a2);
+
+    /* Slip relation */
+    double Psi = Phi - (F_phi / F) * delta_phi;
+
+    /* Perturbed Klein-Gordon (simplified quasi-static) */
+    double ddelta_phi_prime = 
+        - (3.0*H + F_phi * pvecback[pba->index_bg_dphi_prtoe] / (F * a)) * ddelta_phi
+        - (k2_over_a2 + m_eff2) * delta_phi
+        + (F_phi / F) * 3.0 * (H_prime/a + 2.0*H*H) * (3.0*Psi + 2.0*Phi);
+
+    /* Store for sources */
+    ppw->pvecmetric[ppw->index_mt_Phi_prtoe] = Phi;
+    ppw->pvecmetric[ppw->index_mt_Psi_prtoe] = Psi;
+    ppw->pvecmetric[ppw->index_mt_Geff_prtoe] = Geff;
+
+    /* Derivatives */
+    dy[ppw->pv->index_pt_delta_prtoe]  = ddelta_phi;
+    dy[ppw->pv->index_pt_ddelta_prtoe] = ddelta_phi_prime;
+    dy[ppw->pv->index_pt_Phi_prtoe]    = Phi_prime;
+}
+
+5. perturb_sources() — PRTOE Contributions
+Add this block in perturb_sources():
+Cif (pba->has_prtoe == _TRUE_) {
+
+    double Phi = ppw->pvecmetric[ppw->index_mt_Phi_prtoe];
+    double Psi = ppw->pvecmetric[ppw->index_mt_Psi_prtoe];
+    double Geff = ppw->pvecmetric[ppw->index_mt_Geff_prtoe];
+
+    /* Modified ISW */
+    if (index_tp_t > 0) {
+        sources[index_tp_t] += 2.0 * (Phi_prime + Psi_prime);
+    }
+
+    /* Lensing */
+    if (index_tp_p > 0 || index_tp_l > 0) {
+        double lensing = (Phi + Psi) * (1.0 + (Geff - 1.0) * 0.5);
+        if (index_tp_p > 0) sources[index_tp_p] += lensing;
+        if (index_tp_l > 0) sources[index_tp_l] += lensing;
+    }
+
+    /* Matter sources (growth) */
+    if (index_tp_m > 0) {
+        sources[index_tp_m] += Geff * delta_m;
+    }
+}
+
+
+
+
+
+

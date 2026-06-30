@@ -1,0 +1,39 @@
+[1mdiff --git a/launch_windows_wsl.bat b/launch_windows_wsl.bat[m
+[1mindex 3aadb3c5..76e10f56 100644[m
+[1m--- a/launch_windows_wsl.bat[m
+[1m+++ b/launch_windows_wsl.bat[m
+[36m@@ -16,22 +16,26 @@[m [mif %errorlevel% neq 0 ([m
+ echo.[m
+ echo Starting CosmicDashboard with launch_cosmic.sh ...[m
+ echo.[m
+[31m-echo   LT_SUBDOMAIN   = TheMilkmanJ[m
+[31m-echo   DASHBOARD_USER = TheMilkmanJ[m
+[31m-echo   DASHBOARD_PASS = (set)[m
+[31m-echo.[m
+ echo (Press Ctrl+C to stop)[m
+ echo.[m
+ [m
+ cd /d "%~dp0"[m
+ [m
+[32m+[m[32mREM Dynamically resolve WSL path of the current directory to make it portable[m
+[32m+[m[32mfor /f "delims=" %%i in ('wsl wslpath -u "%cd%"') do set "WSL_DIR=%%i"[m
+[32m+[m
+ REM Prompt for credentials[m
+[31m-set /p LT_SUBDOMAIN=Enter LT_SUBDOMAIN:[m
+[31m-set /p DASHBOARD_USER=Enter DASHBOARD_USER:[m
+[31m-set /p DASHBOARD_PASS=Enter DASHBOARD_PASS:[m
+[32m+[m[32mset "LT_SUBDOMAIN="[m
+[32m+[m[32mset /p LT_SUBDOMAIN="Enter LT_SUBDOMAIN (optional, press Enter for random): "[m
+[32m+[m
+[32m+[m[32mset "DASHBOARD_USER=admin"[m
+[32m+[m[32mset /p DASHBOARD_USER="Enter DASHBOARD_USER [admin]: "[m
+[32m+[m
+[32m+[m[32mset "DASHBOARD_PASS="[m
+[32m+[m[32mset /p DASHBOARD_PASS="Enter DASHBOARD_PASS (optional, press Enter for random): "[m
+ [m
+ REM Run the launcher with environment variables inside WSL[m
+[31m-wsl bash -c "export LT_SUBDOMAIN=\"%LT_SUBDOMAIN%\" && export DASHBOARD_USER=\"%DASHBOARD_USER%\" && export DASHBOARD_PASS=\"%DASHBOARD_PASS%\" && cd \"$(wslpath -a '%cd%')\" && chmod +x launch_cosmic.sh && ./launch_cosmic.sh"[m
+[32m+[m[32mwsl bash -c "export LT_SUBDOMAIN='%LT_SUBDOMAIN%' && export DASHBOARD_USER='%DASHBOARD_USER%' && export DASHBOARD_PASS='%DASHBOARD_PASS%' && cd '%WSL_DIR%' && chmod +x launch_cosmic.sh && ./launch_cosmic.sh"[m
+ [m
+ echo.[m
+ echo CosmicDashboard has stopped.[m

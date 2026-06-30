@@ -13,6 +13,41 @@ import yaml
 import logging
 import warnings
 
+
+def _read_file_safely(file_path, max_retries=3, retry_delay=0.1):
+    """Read a file safely with retry logic for file access conflicts.
+    
+    Uses copy-then-read pattern to avoid blocking on files that may be
+    locked by PolyChord during active runs.
+    
+    Args:
+        file_path: Path to the file to read
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        
+    Returns:
+        String content of file, or None if failed
+    """
+    import time as _time
+    for attempt in range(max_retries):
+        try:
+            # Try to copy the file atomically first
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.tmp', delete=True) as tmp:
+                shutil.copy2(file_path, tmp.name)
+                tmp.seek(0)
+                return tmp.read()
+        except (IOError, OSError, PermissionError, FileNotFoundError) as e:
+            if attempt < max_retries - 1:
+                _time.sleep(retry_delay)
+                continue
+            # On last attempt, try direct read as fallback
+            try:
+                with open(file_path, 'r') as f:
+                    return f.read()
+            except Exception:
+                return None
+    return None
+
 # Silence GetDist's noisy 2D KDE bandwidth optimizer warnings.
 # These are common (and harmless) when:
 # - Forcing weights=1.0 to visualize raw degeneracy valleys (as we do for PRTOE)
@@ -180,37 +215,40 @@ def main(args, first_run=False):
     # Check for completed chains first
     if os.path.exists(root_finished + ".txt") and os.path.getsize(root_finished + ".txt") > 0:
         root_name = root_finished
-        with open(root_name + ".txt", "r") as f:
-            lines = f.readlines()
-        d = load_lines_safely(lines, is_raw_file=False)
-        if d is not None:
-            data_parts.append(d)
+        content = _read_file_safely(root_name + ".txt")
+        if content is not None:
+            lines = content.splitlines()
+            d = load_lines_safely(lines, is_raw_file=False)
+            if d is not None:
+                data_parts.append(d)
     else:
         # If not finished, read the raw dead points AND live points from PolyChord
         raw_dead = root_raw + ".txt"
         raw_live = root_raw + "_phys_live.txt"
         
         if os.path.exists(raw_dead) and os.path.getsize(raw_dead) > 0:
-            with open(raw_dead, "r") as f:
-                lines = f.readlines()
-            d = load_lines_safely(lines, is_raw_file=True)
-            if d is not None:
-                data_parts.append(d)
+            content = _read_file_safely(raw_dead)
+            if content is not None:
+                lines = content.splitlines()
+                d = load_lines_safely(lines, is_raw_file=True)
+                if d is not None:
+                    data_parts.append(d)
                 
         # Only use live points if dead points are not yet populated (Initialization Phase)
         if not data_parts and os.path.exists(raw_live) and os.path.getsize(raw_live) > 0:
             is_initialization = True
-            with open(raw_live, "r") as f:
-                lines = f.readlines()
-            d = load_lines_safely(lines, is_raw_file=True)
-            if d is not None:
-                d = np.atleast_2d(d)
-                # phys_live format is [p1..pN, logL]. Mock it to [weight, -2logL, p1..pN]
-                weights = np.ones((d.shape[0], 1))
-                logL = -2.0 * d[:, -1:]  # -2 logL to match PolyChord's raw chain Col 1 format!
-                params = d[:, :-1]
-                d_mock = np.hstack((weights, logL, params))
-                data_parts.append(d_mock)
+            content = _read_file_safely(raw_live)
+            if content is not None:
+                lines = content.splitlines()
+                d = load_lines_safely(lines, is_raw_file=True)
+                if d is not None:
+                    d = np.atleast_2d(d)
+                    # phys_live format is [p1..pN, logL]. Mock it to [weight, -2logL, p1..pN]
+                    weights = np.ones((d.shape[0], 1))
+                    logL = -2.0 * d[:, -1:]  # -2 logL to match PolyChord's raw chain Col 1 format!
+                    params = d[:, :-1]
+                    d_mock = np.hstack((weights, logL, params))
+                    data_parts.append(d_mock)
                 
         root_name = root_raw
         

@@ -1,11 +1,48 @@
 import os
 import re
 import yaml
+import time
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional, List
 from fastapi import HTTPException
 from parsers.logs import safe_parse_python_dict, get_best_fit_from_log
 import os.path as osp
+
+
+def _read_file_safely(file_path, max_retries=3, retry_delay=0.1):
+    """Read a file safely with retry logic for file access conflicts.
+    
+    Uses copy-then-read pattern to avoid blocking on files that may be
+    locked by PolyChord during active runs.
+    
+    Args:
+        file_path: Path to the file to read
+        max_retries: Maximum number of retry attempts
+        retry_delay: Delay between retries in seconds
+        
+    Returns:
+        String content of file, or None if failed
+    """
+    for attempt in range(max_retries):
+        try:
+            # Try to copy the file atomically first
+            with tempfile.NamedTemporaryFile(mode='w+', suffix='.tmp', delete=True) as tmp:
+                shutil.copy2(str(file_path), tmp.name)
+                tmp.seek(0)
+                return tmp.read()
+        except (IOError, OSError, PermissionError, FileNotFoundError) as e:
+            if attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                continue
+            # On last attempt, try direct read as fallback
+            try:
+                with open(str(file_path), 'r') as f:
+                    return f.read()
+            except Exception:
+                return None
+    return None
 
 def _assert_within_workspace(path: str, detail: str) -> None:
     """Canonical workspace containment check using realpath and commonpath."""
@@ -313,29 +350,29 @@ def get_best_fit_details(output_prefix: str, state=None, active_yaml_path: str =
             best_chi2_this_file = current_best["total"] if current_best else float('inf')
             best_fit_this_file = current_best
             
-            with open(fpath, 'r', errors='ignore') as f:
-                start_pos = raw_file_positions[fpath_str]
-                
-                # Check for header in final_file on every incremental read so
-                # appended rows still use the correct column mapping.
-                has_header = False
-                names_in_header = []
-                if ftype == "final":
-                    f.seek(0)
-                    first_line = f.readline()
-                    if first_line.startswith('#'):
-                        has_header = True
-                        names_in_header = first_line.lstrip('#').strip().split()
-                        if start_pos == 0:
-                            start_pos = f.tell()
-                            raw_file_positions[fpath_str] = start_pos
-                f.seek(start_pos)
-                
-                for line in f:
-                    if line.strip().startswith('#'):
-                        continue
-                    parts = line.strip().split()
-                    if len(parts) >= 2:
+            # Try to open file with safe retry logic
+            content = _read_file_safely(fpath)
+            if content is None:
+                # Skip this file if we can't read it (file locked or doesn't exist)
+                continue
+            
+            # Process all lines from the file - simpler and avoids file locking issues
+            lines = content.splitlines()
+            
+            # Check for header in final_file
+            has_header = False
+            names_in_header = []
+            if ftype == "final" and lines:
+                if lines[0].startswith('#'):
+                    has_header = True
+                    names_in_header = lines[0].lstrip('#').strip().split()
+                    lines = lines[1:]  # Skip header
+            
+            for line in lines:
+                if line.strip().startswith('#'):
+                    continue
+                parts = line.strip().split()
+                if len(parts) >= 2:
                         try:
                             # 1. Compute total chi2 based on file type
                             if ftype == "live":
@@ -451,15 +488,14 @@ def get_best_fit_details(output_prefix: str, state=None, active_yaml_path: str =
                                 }
                         except (ValueError, IndexError):
                             pass
-                raw_file_positions[fpath_str] = f.tell()
+                # Update cache with best fit found
                 if best_fit_this_file:
                     best_fit_file_cache[fpath_str] = best_fit_this_file
                     
+                # Update state with caches
                 if is_dict:
-                    state["raw_file_positions"] = raw_file_positions
                     state["best_fit_file_cache"] = best_fit_file_cache
                 else:
-                    state.raw_file_positions = raw_file_positions
                     state.best_fit_file_cache = best_fit_file_cache
                 
             if best_fit_this_file and (best_file_fit is None or best_fit_this_file["total"] < best_chi2_file):

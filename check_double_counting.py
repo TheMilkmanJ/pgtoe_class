@@ -1,5 +1,22 @@
 import sys
-sys.path.insert(0, "/home/themilkmanj/prtoe_class/build/lib.linux-x86_64-cpython-313")
+import os
+from pathlib import Path
+
+# Dynamic search for classy build directory
+classy_build_root = os.environ.get("CLASSY_BUILD_ROOT")
+if classy_build_root:
+    import glob
+    build_dirs = sorted(glob.glob(os.path.join(classy_build_root, "build", "lib.*")))
+    if build_dirs:
+        sys.path.insert(0, build_dirs[-1])
+else:
+    # Fallback to repo-relative build directory
+    repo_root = Path(__file__).resolve().parent
+    import glob
+    build_dirs = sorted(glob.glob(os.path.join(repo_root, "build", "lib.*")))
+    if build_dirs:
+        sys.path.insert(0, build_dirs[-1])
+
 from classy import Class
 
 c = Class()

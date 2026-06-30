@@ -1,0 +1,137 @@
+# Simple PRTOE_COSMICFORGE Configuration for Demonstration
+# This is a minimal configuration file for testing and learning
+
+# Output directory and prefix for results
+output: chains/simple_demo
+
+# Likelihoods (data to fit)
+# For a quick test, we use just a few likelihoods
+likelihood:
+  planck_2018_lowl.TT: null
+  sn.pantheonplusshoes: null
+
+# Theory code (CLASS with PRTOE modifications)
+theory:
+  classy:
+    path: /home/themilkmanj/prtoe_class
+    stop_at_error: false
+    extra_args:
+      use_prtoe: 'yes'
+      non_linear: halofit
+      output: mPk,tCl,pCl,lCl
+      modes: s
+      N_ur: 2.0328
+      N_ncdm: 1
+      T_ncdm: 0.71611
+      base_path: /home/themilkmanj/prtoe_class
+
+# Parameters to sample
+# Each parameter needs a prior (range) and a reference value
+params:
+  # Standard cosmological parameters
+  omega_b:
+    prior:
+      min: 0.019
+      max: 0.026
+    ref: 0.0224
+    proposal: 0.0001
+    latex: \Omega_\mathrm{b} h^2
+  
+  omega_cdm:
+    prior:
+      min: 0.1
+      max: 0.2
+    ref: 0.12
+    proposal: 0.001
+    latex: \Omega_\mathrm{c} h^2
+  
+  H0:
+    prior:
+      min: 55.0
+      max: 85.0
+    ref: 67.4
+    proposal: 0.5
+    latex: H_0
+  
+  # Primordial power spectrum
+  logA:
+    prior:
+      min: 1.61
+      max: 3.91
+    ref: 3.05
+    proposal: 0.001
+    latex: \ln(10^{10} A_\mathrm{s})
+    drop: true
+  
+  A_s:
+    value: 'lambda logA: 1e-10 * np.exp(logA)'
+    latex: A_\mathrm{s}
+  
+  n_s:
+    prior:
+      min: 0.8
+      max: 1.2
+    ref: 0.965
+    proposal: 0.005
+    latex: n_\mathrm{s}
+
+  # Reionization
+  z_reio:
+    prior:
+      min: 5.0
+      max: 12.0
+    ref: 8.0
+    proposal: 0.1
+    latex: z_\mathrm{reio}
+
+  # Planck calibration parameter
+  A_planck:
+    prior:
+      dist: norm
+      loc: 1.0
+      scale: 0.0025
+    ref: 1.0
+    proposal: 0.00025
+    latex: A_\mathrm{planck}
+
+  # PRTOE-specific parameters
+  xi_prtoe:
+    prior:
+      min: 1.0e-07
+      max: 1.2e-05
+    ref: 1.0e-07
+    proposal: 1.0e-08
+    latex: \xi_\mathrm{prtoe}
+  
+  zeta_prtoe:
+    prior:
+      min: 0.0001
+      max: 5.0
+    ref: 0.1
+    proposal: 0.05
+    latex: \zeta_\mathrm{prtoe}
+
+  # Derived PRTOE parameters (fixed in this demo)
+  V0_prtoe:
+    value: 'lambda omega_b, omega_cdm, H0: 1.0 - (omega_b + omega_cdm) / (H0/100.0)**2'
+    latex: V_{0,\mathrm{prtoe}}
+  
+  lambda_prtoe:
+    value: 0.05
+    latex: \lambda_\mathrm{prtoe}
+  
+  m_prtoe:
+    value: 0.05
+    latex: m_\mathrm{prtoe}
+
+# Sampler configuration (PolyChord nested sampling)
+sampler:
+  polychord:
+    nlive: 100  # Reduced for faster demo (default: 200)
+    num_repeats: 40  # Reduced for faster demo (default: 80)
+    precision_criterion: 0.001
+
+# To run this demo:
+# python run_cosmicforge.py simple_demo.yaml --cores 4 --mcmc-steps 1000
+#
+# This will run faster than the full configuration and is good for testing.

@@ -1,0 +1,17 @@
+ -> PRTOE Framework Activated (v1.0 Screened Model Bound Loaded)
+Running CLASS version v3.3.4
+Computing background
+Chose ndf15 as generic_evolver
+ -> age = 23.958214 Gyr
+ -> conformal age = 24618.596319 Mpc
+ -> N_eff = 3.044 (summed over all species that are non-relativistic at early times) 
+    Scalar field details:
+     -> Omega_scf = -nan, wished 0
+
+
+Error running background_init 
+=>background_init(L:1163) :error in background_find_equality(ppr,pba);
+=>background_find_equality(L:2769) :error in background_at_tau(pba,tau_mid,long_info,inter_closeby,&index_tau_minus,pvecback);
+=>background_at_tau(L:256) :error in background_z_of_tau(pba,tau,&z);
+=>background_z_of_tau(L:369) :condition (tau > pba->tau_table[pba->bt_size-1]) is true; out of range: tau=1.969162e+02 > tau_max=0.000000e+00
+

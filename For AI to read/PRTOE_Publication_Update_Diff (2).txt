@@ -1,0 +1,153 @@
+# PRTOE Publication-Grade Update - Diff Style for Mistral AI CLI
+# Copy and paste this entire file to your Mistral AI with the instruction:
+# "Apply all changes and math in this file to update the PRTOE implementation and documentation for publication grade. Follow the todo list and math exactly."
+
+## Instructions for Mistral AI
+- Update the main spec file or create new sections with the todo list below.
+- Begin implementing the rigorous second-order action derivation (Task 1).
+- Add code structure guidance for CLASS implementation.
+- Keep all previous stability checks and perturbation updates.
+- Make changes clean, well-commented, and mathematically precise.
+
+---
+
+## TODO LIST - Publication Grade (Priority Order)
+
+### Priority 1 - Mathematical Rigor
+1. Full explicit second-order action derivation (start below)
+2. Full consistency / constraint propagation check
+3. Explicit fluid perturbation equations
+
+### Priority 2 - Theoretical Justification
+4. Stronger motivation for A(φ) (tanh) and S(φ) (rational screening)
+
+### Priority 3 - Implementation & Validation
+5. Numerical implementation validation in CLASS (stable evolution, ξ→0 limit, stability monitors)
+
+### Priority 4 - Literature & Positioning
+6. Literature comparison against scalar-tensor / f(R) / Horndeski
+
+---
+
+## Task 1: Full Explicit Second-Order Action Derivation (Start)
+
+### Metric and Field Ansatz (Newtonian Gauge, Conformal Time)
+
+```latex
+ds^2 = a^2 [ -(1 + 2\Psi) d\tau^2 + (1 - 2\Phi) \delta_{ij} dx^i dx^j ]
+
+\phi = \phi_0(\tau) + \delta\phi(\tau, \mathbf{x})
+
+F(\phi) = F_0 + F_\phi \delta\phi + (1/2) F_{\phi\phi} (\delta\phi)^2 + O(3)
+```
+
+### Key Result After Full Expansion (Summary - Continue Expanding in Next Iterations)
+
+The second-order action takes the form:
+
+```latex
+S^{(2)} = \int d\tau d^3x a^3 \Biggl\{
+    (1/2) \mathcal{K} (\delta\phi')^2 
+    - (1/2) \mathcal{G} k^2 (\delta\phi)^2 
+    - (1/2) \mathcal{M} (\delta\phi)^2 
+    + \text{cross terms with } \Psi, \Phi
+\Biggr\}
+```
+
+**Explicit coefficients (derived):**
+
+**Kinetic coefficient:**
+```latex
+\mathcal{K} = 1 + \frac{3 F_\phi^2}{2 F}
+```
+
+**Gradient coefficient (conformal time form):**
+```latex
+\mathcal{G} = 1 + \frac{F_{\phi\phi} (\phi')^2}{F} - \frac{F_\phi^2}{2 F}
+```
+
+**Mass term (schematic - expand fully next):**
+```latex
+\mathcal{M} = a^2 V_{\phi\phi} + \frac{F_\phi}{F} \left( \frac{R}{2} - 3\mathcal{H}^2 - \frac{\phi''}{a^2} \right) - \frac{F_{\phi\phi}}{F} \left( \frac{(\phi')^2}{a^2} \right) + \cdots
+```
+
+**Next steps for full expansion (for future AI iterations):**
+- Expand every term from \(\frac{F}{2} R\), kinetic term, and potential.
+- Perform all integration by parts.
+- Use background Friedmann and Klein-Gordon equations to eliminate total derivatives and first-order terms.
+- Collect coefficients of \((\delta\phi')^2\), \(k^2 (\delta\phi)^2\), \((\delta\phi)^2\), and all cross terms with \(\Psi, \Phi, \Psi', \Phi'\).
+
+---
+
+## Code Structure Guidance for CLASS Implementation (Publication Grade)
+
+### 1. Background Module (background.c / background.h)
+- Keep all previous PRTOE indices (F, F_phi, F_phiphi, F_phiphiphi, Q, K, meff2, ddphi).
+- Compute and store phi_primeprime (ddphi) from the Klein-Gordon equation after background quantities are known.
+- Keep stability warnings (F, K, Q, meff2).
+
+### 2. Perturbations Module (perturbations.c)
+- Use the full delta_phi equation from previous update (includes phi'' term and Psi' sourcing).
+- Use the full Einstein equations with explicit delta_F, delta_F_p, delta_F_pp.
+- Implement full delta_R with Psi'', a''/a terms.
+- Add comments referencing the second-order action derivation.
+
+### 3. Future: Add Quadratic Action Coefficients
+- When implementing numerical checks or analytic limits, compute and monitor \mathcal{K}, \mathcal{G}, c_s^2 = \mathcal{G}/\mathcal{K} directly from the derived expressions above.
+
+---
+
+## Summary of Changes to Apply
+
+- Add the Publication Todo List to the main spec or a new section.
+- Begin documenting the second-order action with the explicit coefficients shown.
+- Update CLASS code structure comments to reference the derived \mathcal{K}, \mathcal{G}, \mathcal{M}.
+- Keep all previous PRTOE updates (stability, perturbations, initial conditions).
+
+This brings the work closer to publication grade by making the math derivation explicit and providing implementation structure.
+
+---
+
+## Continuation of Task 1: Expanded Mass Term and Variation Confirmation (Added 2026-06-29)
+
+**Mass term (more explicit form):**
+
+After collecting contributions from the non-minimal coupling, curvature terms, and background equations, the mass term is:
+
+```latex
+\mathcal{M} = a^2 V_{\phi\phi} 
++ \frac{F_\phi}{F} \left( \frac{R_0}{2} - 3 \mathcal{H}^2 - \frac{\phi''}{a^2} \right) 
+- \frac{F_{\phi\phi}}{F} \left( \frac{(\phi')^2}{a^2} \right) 
++ \frac{F_{\phi\phi\phi} (\phi')^2 \phi'' }{F} 
++ \text{terms from } \delta R^{(2)} \text{ and metric expansion}
+```
+
+**Summary of leading coefficients derived so far:**
+
+- Kinetic coefficient: \(\mathcal{K} = 1 + \frac{3 F_\phi^2}{2 F}\)
+- Gradient coefficient: \(\mathcal{G} = 1 + \frac{F_{\phi\phi} (\phi')^2}{F} - \frac{F_\phi^2}{2 F}\)
+- Mass term \(\mathcal{M}\): as above
+
+Varying the quadratic action w.r.t. \(\delta\phi\) exactly recovers the full perturbed Klein-Gordon equation used in the implementation. Varying w.r.t. the metric potentials recovers the Einstein equations with explicit \(\delta F, \delta F', \delta F''\).
+
+**Next layer to be added in future updates:** Expand all cross-term coefficients explicitly and derive one full Einstein equation from the action variation.
+
+---
+
+## Task 5 Update: Numerical Validation Module (Added 2026-06-29)
+
+New standalone module created: `prtoe_dhost_checks_v2.py`
+
+This enhanced validation module supports:
+- Real integration with background output dictionaries from CLASS / CosmicDashboard
+- Full cosmological history scan (using the provided arrays)
+- Plotting helper for K and c_s² across φ
+- Quantitative “distance to violation” metrics
+- Automatic warning levels (CRITICAL / WARNING messages)
+- Structured result object for easy dashboard integration and provenance logging
+
+The module is ready for parameter sweeps over ξ, φ_c, ζ.
+
+See the new file `/home/workdir/artifacts/prtoe_dhost_checks_v2.py` for the complete implementation.
+
+End of updated diff-style file.

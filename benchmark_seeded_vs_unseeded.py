@@ -15,14 +15,17 @@ Run AFTER the optimizer Phase 1 completes (chains/prtoe_poly.summary.json exists
 import sys, os, json, time, subprocess
 from pathlib import Path
 
-sys.path.insert(0, '/home/themilkmanj')
+REPO_ROOT = Path(__file__).resolve().parent
+WORKSPACE_ROOT = Path(os.environ.get("DASHBOARD_WORKSPACE_ROOT", REPO_ROOT))
+sys.path.insert(0, str(WORKSPACE_ROOT.parent))
 
-OPTIMIZER_PREFIX  = '/home/themilkmanj/prtoe_class/chains/prtoe_poly'
-SEEDED_PREFIX     = '/home/themilkmanj/prtoe_class/chains/prtoe_seeded'
-UNSEEDED_PREFIX   = '/home/themilkmanj/prtoe_class/chains/prtoe_unseeded'
-PRTOE_YAML        = '/home/themilkmanj/prtoe_class/prtoe_standard.yaml'
-PACKAGES_PATH     = '/home/themilkmanj/cobaya_packages_clean'
-LOG_DIR           = '/home/themilkmanj/prtoe_class/chains'
+CHAINS_DIR = WORKSPACE_ROOT / "chains"
+OPTIMIZER_PREFIX = str(CHAINS_DIR / "prtoe_poly")
+SEEDED_PREFIX = str(CHAINS_DIR / "prtoe_seeded")
+UNSEEDED_PREFIX = str(CHAINS_DIR / "prtoe_unseeded")
+PRTOE_YAML = str(WORKSPACE_ROOT / "prtoe_standard.yaml")
+PACKAGES_PATH = os.environ.get("COBAYA_PACKAGES_PATH")
+LOG_DIR = str(CHAINS_DIR)
 
 
 def wait_for_summary(prefix, timeout_s=7200, poll_s=30):
@@ -179,14 +182,14 @@ def compare_results(unseeded_res, seeded_res):
         print(f"  Seeded wall time   : {seeded_res['wall_time_s']:.1f}s")
         print(f"  Speedup            : {speedup:.2f}x")
 
-    if us_stats.get('dead_points') and s_stats.get('dead_points'):
+    if us_stats.get('dead_points') is not None and s_stats.get('dead_points') is not None:
         dp_ratio = us_stats['dead_points'] / s_stats['dead_points']
         comparison['dead_point_reduction'] = round(dp_ratio, 2)
         print(f"  Unseeded dead pts  : {us_stats['dead_points']}")
         print(f"  Seeded dead pts    : {s_stats['dead_points']}")
         print(f"  Dead pt ratio      : {dp_ratio:.2f}x")
 
-    if us_stats.get('log_evidence') and s_stats.get('log_evidence'):
+    if us_stats.get('log_evidence') is not None and s_stats.get('log_evidence') is not None:
         delta = abs(float(us_stats['log_evidence']) - float(s_stats['log_evidence']))
         comparison['evidence_delta'] = round(delta, 4)
         print(f"  Unseeded ln(Z)     : {us_stats['log_evidence']:.4f}")
