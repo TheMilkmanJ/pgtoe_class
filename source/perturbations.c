@@ -1652,7 +1652,7 @@ int perturbations_timesampling_for_sources(
                 pvecback[pba->index_bg_H]/
                 pvecthermo[pth->index_th_dkappa] >
                 ppr->start_sources_at_tau_c_over_tau_h) && 
-               (prtoe_source_condition == _FALSE_),
+               (prtoe_source_condition == _FALSE_) && prtoe_is_physically_active(pba),
                ppt->error_message,
                "your choice of initial time for computing sources is inappropriate: it corresponds to an earlier time than the one at which the integration of thermodynamical variables started (tau=%g). You should increase either 'start_sources_at_tau_c_over_tau_h' or 'recfast_z_initial'\n",
                tau_lower);
@@ -1683,7 +1683,7 @@ int perturbations_timesampling_for_sources(
                 pvecback[pba->index_bg_H]/
                 pvecthermo[pth->index_th_dkappa] <
                 ppr->start_sources_at_tau_c_over_tau_h) && 
-               (prtoe_source_condition == _FALSE_),
+               (prtoe_source_condition == _FALSE_) && prtoe_is_physically_active(pba),
                ppt->error_message,
                "your choice of initial time for computing sources is inappropriate: it corresponds to a time after recombination. You should decrease 'start_sources_at_tau_c_over_tau_h'\n");
 
@@ -1716,7 +1716,7 @@ int perturbations_timesampling_for_sources(
            pvecback[pba->index_bg_H]/
            pvecthermo[pth->index_th_dkappa] >
            ppr->start_sources_at_tau_c_over_tau_h) && 
-          (prtoe_source_condition == _FALSE_))
+          (prtoe_source_condition == _FALSE_) && prtoe_is_physically_active(pba))
 
         tau_upper = tau_mid;
       else
@@ -9667,8 +9667,8 @@ int perturbations_derivs(double tau,
 
     if (pba->use_prtoe == _TRUE_) {
         /* ==== STEP 2: Patch perturbations_derivs for Stability ==== */
-        /* Use the same threshold as Lambda budget: xi > 1e-10 for active */
-        int prtoe_active = (pba->xi_prtoe > 1e-10);
+        /* Use the same threshold as Lambda budget: xi > 1e-8 for active */
+        int prtoe_active = (pba->xi_prtoe > 1e-8);
         
         /* ==== STEP 3: Diagnostic Hook ==== */
         /* Check for stiffness in PRTOE perturbations */

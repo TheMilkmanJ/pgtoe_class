@@ -132,6 +132,7 @@
 /* Forward declarations for PRTOE functions */
 int prtoe_normalize_phi0(struct background * pba);
 static double prtoe_rho_at_today_approx(struct background * pba, double phi, double V0, double lambda, double m);
+int prtoe_compute_quantities(struct background * pba, double a, double phi, double phi_dot, double * F, double * F_phi, double * F_dot, double * trans, double * xi_screened, ErrorMsg error_message);
 
 int background_at_z(
                     struct background *pba,
@@ -682,11 +683,11 @@ int background_functions(
     pvecback[pba->index_bg_rho_lambda] = pba->Omega0_lambda * pow(pba->H0, 2);
 
     /* === Lambda handling with PRTOE ===
-     * - Keep Lambda for LambdaCDM or null-limit tests (very small xi)
-     * - Only drop Lambda when PRTOE is meaningfully active (xi > 1e-10)
+     * - Keep Lambda for LambdaCDM or null-limit tests (xi <= 1e-8)
+     * - Only drop Lambda when PRTOE is meaningfully active (xi > 1e-8)
      *   and we intend for PRTOE to provide the dark energy component.
      */
-    if (pba->use_prtoe == _FALSE_ || pba->xi_prtoe < 1e-10) {
+    if (pba->use_prtoe == _FALSE_ || pba->xi_prtoe <= 1e-8) {
       rho_tot += pvecback[pba->index_bg_rho_lambda];
       p_tot   -= pvecback[pba->index_bg_rho_lambda];
     }
@@ -825,9 +826,19 @@ int background_functions(
         double F_dot = F_phi * phi_dot;
         pvecback[pba->index_bg_F_dot_prtoe] = F_dot;
 
-        /* Klein-Gordon */
-        double H_dot_old = pvecback[pba->index_bg_H_prime] / a;
-        double phi_ddot = -3.0 * H * phi_dot - V_phi + 3.0 * F_phi * (H_dot_old + 2.0 * H * H);
+        /* Improved H_dot estimate (less lagged) */
+        double H_dot;
+        if (F > 1e-30) {
+            /* Approximate from differentiated Friedmann (leading order) */
+            H_dot = - (3.0/2.0) * (rho_tot + p_tot) * a / (3.0 * F)
+                    - (F_dot * H) / F 
+                    + (pba->K / (a*a)) * (F_dot / F);
+        } else {
+            H_dot = pvecback[pba->index_bg_H_prime] / a;   // fallback
+        }
+
+        /* Improved Klein-Gordon equation */
+        double phi_ddot = -3.0 * H * phi_dot - V_phi + (F_phi / MAX(F, 1e-30)) * (H_dot + 2.0 * H * H);
         double phi_primeprime = phi_ddot * a * a + 2.0 * H * a * a * phi_dot;
         pvecback[pba->index_bg_ddphi_prtoe] = phi_primeprime;
 
@@ -3410,6 +3421,84 @@ int background_output_budget(
  and \f$ \rho^{class} \f$ has the proper dimension \f$ Mpc^-2 \f$.
 */
 
+/**
+ * Compute common PRTOE background quantities (F, F_phi, activation, etc.)
+ * This helper reduces code duplication between background_functions() and background_derivs().
+ * Note: get_xi_eff(pba, phi) already includes phi^2 screening, so F = 1 + xi_eff * A(phi)
+ */
+int prtoe_compute_quantities(
+    struct background * pba,
+    double a,
+    double phi,
+    double phi_dot,
+    double * F,
+    double * F_phi,
+    double * F_dot,
+    double * trans,
+    double * xi_screened,
+    ErrorMsg error_message
+) {
+    /* === Potential === */
+    double exp_term = exp(-pba->lambda_prtoe * phi);
+    double V = pba->V0_prtoe * exp_term + 0.5 * pba->m_prtoe * pba->m_prtoe * phi * phi;
+
+    /* === Coupling function F(phi) with consistent screening via get_xi_eff === */
+    double xi_eff = get_xi_eff(pba, phi);
+    double u = (phi - pba->phi_c_prtoe) / pba->delta_phi_prtoe;
+    double tanh_u = tanh(u);
+    double sech2_u = 1.0 - tanh_u * tanh_u;
+
+    double A = 0.5 * (1.0 + tanh_u);
+    double A_prime = sech2_u / (2.0 * pba->delta_phi_prtoe);
+
+    /* F(phi) = 1 + xi_eff * A, where xi_eff already includes phi^2 screening */
+    double F_val = 1.0 + xi_eff * A;
+    /* F_phi = dF/dphi = xi_eff * A_prime + A * d(xi_eff)/dphi */
+    /* For xi_eff = prtoe_xi * phi^2 / (1 + zeta * phi^2), we have: */
+    /* d(xi_eff)/dphi = prtoe_xi * [2phi(1+zeta*phi^2) - phi^2*2*zeta*phi] / (1+zeta*phi^2)^2 */
+    /*                = prtoe_xi * 2phi / (1+zeta*phi^2)^2 */
+    double dxi_eff_dphi = pba->prtoe_xi * 2.0 * phi / pow(1.0 + pba->zeta_prtoe * phi * phi, 2);
+    double F_phi_val = xi_eff * A_prime + A * dxi_eff_dphi;
+
+    /* === Covariant Activation: Use rho_phi / rho_r ratio === */
+    double phi_dot2 = phi_dot * phi_dot;
+    double rho_phi_candidate = 0.5 * phi_dot2 + V;
+
+    /* Radiation density (photons + ultra-relativistic species) */
+    double rho_r = pba->Omega0_g * pow(pba->H0, 2) / pow(a, 4);
+    if (pba->has_ur == _TRUE_) {
+        rho_r += pba->Omega0_ur * pow(pba->H0, 2) / pow(a, 4);
+    }
+
+    /* Safe ratio computation */
+    double ratio = 0.0;
+    if (rho_r > 1e-300 && rho_phi_candidate > 1e-300) {
+        ratio = rho_phi_candidate / rho_r;
+    } else if (rho_phi_candidate > 1e-300) {
+        ratio = 1e10;   /* Force activation if radiation is negligible */
+    }
+
+    double activation_threshold = 0.01;
+    double width_trans = 0.1;
+
+    /* Extremely safe log argument */
+    double safe_ratio = MAX(ratio, 1e-80);
+    double x_trans = (log(safe_ratio) - log(activation_threshold)) / width_trans;
+    double trans_val = 0.5 * (1.0 + tanh(x_trans));
+
+    /* xi_screened combines xi_eff with activation trans */
+    double xi_effective = xi_eff * trans_val;
+
+    /* Output */
+    *F = F_val;
+    *F_phi = F_phi_val;
+    *F_dot = F_phi_val * phi_dot;
+    *trans = trans_val;
+    *xi_screened = xi_effective;
+
+    return _SUCCESS_;
+}
+
 int background_prtoe_potential(struct background * pba, double phi, double * V, double * dV, double * ddV) {
   double exp_term = exp(-pba->prtoe_lambda * phi);
   *V = pba->prtoe_v0 * exp_term + 0.5 * pow(pba->prtoe_mass, 2) * pow(phi, 2);
@@ -3428,7 +3517,7 @@ int background_prtoe_potential(struct background * pba, double phi, double * V, 
 int prtoe_normalize_phi0(struct background * pba) {
 
     /* Skip normalization for null limit tests or when PRTOE is off */
-    if (pba->use_prtoe != _TRUE_ || pba->Omega0_prtoe <= 0.0 || pba->xi_prtoe < 1e-10) {
+    if (pba->use_prtoe != _TRUE_ || pba->Omega0_prtoe <= 0.0 || pba->xi_prtoe <= 1e-8) {
         return _SUCCESS_;
     }
 

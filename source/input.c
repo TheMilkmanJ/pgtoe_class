@@ -3474,10 +3474,10 @@ int input_read_parameters_species(struct file_content * pfc,
     */
 
     /* === PRTOE Dark Energy Normalization ===
-     * When PRTOE is active (xi > 1e-10), it replaces Lambda as the dark energy.
-     * For null limit tests (xi < 1e-10), keep Lambda.
+     * When PRTOE is active (xi > 1e-8), it replaces Lambda as the dark energy.
+     * For null limit tests (xi <= 1e-8), keep Lambda.
      */
-    if (pba->use_prtoe == _TRUE_ && pba->xi_prtoe > 1e-10) {
+    if (pba->use_prtoe == _TRUE_ && pba->xi_prtoe > 1e-8) {
         /* PRTOE is active → it provides the dark energy
          * Set Omega0_prtoe from Omega0_lambda (or default to 0.7)
          */
@@ -3491,6 +3491,9 @@ int input_read_parameters_species(struct file_content * pfc,
     } else {
         /* Null limit or PRTOE off → use Lambda */
         pba->Omega0_prtoe = 0.0;
+        /* For null limit, ensure field doesn't contribute energy density */
+        pba->V0_prtoe = 0.0;
+        pba->prtoe_v0 = 0.0;
     }
     
     fprintf(stdout, " -> PRTOE Framework Activated (v1.0 Screened Model Bound Loaded)\n");
