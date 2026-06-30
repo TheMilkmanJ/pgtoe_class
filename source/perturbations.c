@@ -8093,6 +8093,7 @@ int perturbations_sources(
 
     /* delta_scf */
     if (ppt->has_source_delta_scf == _TRUE_) {
+      /* NECESSARY BRANCHING: PRTOE vs SCF fields have different indices */
       if (pba->use_prtoe == _TRUE_) {
         if (ppt->gauge == synchronous){
           delta_rho_scf = 1./3.*(1./a2*ppw->pvecback[pba->index_bg_dphi_prtoe]*y[ppw->pv->index_pt_ddelta_prtoe] + ppw->pvecback[pba->index_bg_dV_scf]*y[ppw->pv->index_pt_delta_prtoe]) + 3.*a_prime_over_a*(1.+pvecback[pba->index_bg_p_prtoe]/pvecback[pba->index_bg_rho_prtoe])*theta_over_k2;
@@ -8222,6 +8223,7 @@ int perturbations_sources(
 
     /* theta_scf */
     if (ppt->has_source_theta_scf == _TRUE_) {
+      /* NECESSARY BRANCHING: PRTOE vs SCF fields have different indices */
       if (pba->use_prtoe == _TRUE_) {
         rho_plus_p_theta_scf = 1./3.*k*k/a2*ppw->pvecback[pba->index_bg_dphi_prtoe]*y[ppw->pv->index_pt_delta_prtoe];
         _set_source_(ppt->index_tp_theta_scf) = rho_plus_p_theta_scf/(pvecback[pba->index_bg_rho_prtoe]+pvecback[pba->index_bg_p_prtoe]) + theta_shift;

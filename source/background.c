@@ -3251,7 +3251,7 @@ int background_derivs(
    *  Activation is controlled by covariant trans factor, not by guards.
    *  When inactive (trans≈0), field naturally doesn't evolve.
    *  ============================================================ */
-  if (pba->omega_dark_energy > 0) {
+  if (pba->use_prtoe == _TRUE_) {
 
     double a = exp(loga);
 
@@ -3391,8 +3391,8 @@ int background_derivs(
     double phi_primeprime = phi_ddot * a * a + 2.0 * H * a * a * phi_dot;
     
     /* Use effective activation (covariant + screening) for smooth field evolution */
-    dy[pba->index_bi_phi_prtoe]  = (dphi / a / MAX(H, 1e-20)) * trans_scaled;
-    dy[pba->index_bi_dphi_prtoe] = phi_primeprime * trans_scaled;
+    dy[pba->index_bi_phi_prtoe]  = (dphi / a / MAX(H, 1e-20)) * trans;
+    dy[pba->index_bi_dphi_prtoe] = phi_primeprime * trans;
 
     if (pba->background_verbose > 3) {
       printf("PRTOE active @ a=%.3e | phi=%.3e | trans=%.3e | H=%.3e\n", a, phi, trans, H);
