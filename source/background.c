@@ -563,25 +563,28 @@ int background_functions(
     pvecback[pba->index_bg_F_phi_prtoe]   = F_phi;
     pvecback[pba->index_bg_F_phiphi_prtoe] = F_phiphi;
 
-    /* === Covariant activation based on physical quantities ===
+    /* === Robust Covariant Activation (early-time safe) ===
      * Instead of using scale factor a, we use the scalar field energy density
      * relative to radiation density for a covariant activation criterion.
      * This ensures the transition happens at the same physical conditions
      * regardless of parameterization.
      */
     double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
-    double rho_r = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0);
+    double rho_r_local = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0);
     
     /* Activate when scalar field energy density exceeds a fraction of radiation density
      * This is covariant and happens at the same physical epoch regardless of 
      * how we parameterize the model.
      */
     double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
-    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
+    double ratio = 0.0;
+    if (rho_r_local > 1e-200 && rho_phi_candidate > 1e-200) {
+        ratio = rho_phi_candidate / rho_r_local;
+    }
     
     /* Smooth transition */
     double width_trans = 0.1;  // Width in log(ratio)
-    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
+    double x_trans = (log(MAX(ratio, 1e-60)) - log(activation_threshold)) / width_trans;
     double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
 
     /* Pre-compute rho_prtoe and p_prtoe for Friedmann equation */
@@ -721,20 +724,31 @@ int background_functions(
     double F_dot = F_prime / a;
     
     /* PRTOE modified Friedmann equation: 3 F H^2 - 3 H F_dot = rho_tot - 3 F K/a^2 */
-    double rho_k = 3.0 * F * pba->K / (a * a);
-    double A = 3.0 * F;
+    double rho_k = 3.0 * MAX(F, 1e-30) * pba->K / (a * a);
+    double A = 3.0 * MAX(F, 1e-30);
     double B = -3.0 * F_dot;
     double C = -(rho_tot - rho_k);
 
     double discriminant = B*B - 4.0*A*C;
 
-    if (discriminant >= 0.0 && F > 1e-30) {
-      double H_new = (-B + sqrt(discriminant)) / (2.0 * A);
-      pvecback[pba->index_bg_H] = MAX(0.0, H_new);
+    if (discriminant >= -1e-10 && F > 1e-30) {   // allow tiny negative due to numerics
+        double disc = MAX(discriminant, 0.0);
+        double H_new = (-B + sqrt(disc)) / (2.0 * A);
+        pvecback[pba->index_bg_H] = MAX(0.0, H_new);
+      /* Store F_dot for later use */
+      pvecback[pba->index_bg_F_dot_prtoe] = F_dot;
     } else {
-      /* Fallback to standard Friedmann if something goes wrong */
+      /* Safe fallback to standard Friedmann */
       pvecback[pba->index_bg_H] = sqrt(MAX(0.0, rho_tot - rho_k));
+      /* Store F_dot for later use */
+      pvecback[pba->index_bg_F_dot_prtoe] = F_dot;
     }
+    
+    /* Safety check for H */
+    class_test(pvecback[pba->index_bg_H] <= 0. || !isfinite(pvecback[pba->index_bg_H]),
+               pba->error_message,
+               "H became non-positive or NaN at a=%e (F=%.3e, discriminant=%.3e)", 
+               a, F, discriminant);
   } else {
     if (pba->has_scf == _TRUE_) {
       H_sq_eff /= (1.0 + pba->prtoe_xi * pvecback[pba->index_bg_phi_scf]);
@@ -762,11 +776,14 @@ int background_functions(
      * Recompute using the same physical criterion for consistency
      */
     double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
-    double rho_r = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0);
+    double rho_r_local = pvecback[pba->index_bg_rho_g] + (pba->has_ur ? pvecback[pba->index_bg_rho_ur] : 0.0);
     double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
-    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
+    double ratio = 0.0;
+    if (rho_r_local > 1e-200 && rho_phi_candidate > 1e-200) {
+        ratio = rho_phi_candidate / rho_r_local;
+    }
     double width_trans = 0.1;  // Width in log(ratio)
-    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
+    double x_trans = (log(MAX(ratio, 1e-60)) - log(activation_threshold)) / width_trans;
     double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
 
     if (trans > 0.5) {
@@ -3022,20 +3039,27 @@ int background_derivs(
     double phi = y[pba->index_bi_phi_prtoe];
     double dphi = y[pba->index_bi_dphi_prtoe];
 
-    /* Covariant activation - same as in background_functions */
+    /* === Robust Covariant Activation (early-time safe) === */
     double phi_dot = dphi / a;
-    double V = pba->V0_prtoe * exp(-pba->lambda_prtoe * phi) + 0.5 * pba->m_prtoe * pba->m_prtoe * phi * phi;
-    double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;  // Would-be scalar field density
-    /* Compute radiation density from scale factor (rho_r = rho_g + rho_ur) */
-    double rho_r = pba->Omega0_g * pow(pba->H0,2) / pow(a,4);
+    double V = pba->V0_prtoe * exp(-pba->lambda_prtoe * phi) 
+             + 0.5 * pba->m_prtoe * pba->m_prtoe * phi * phi;
+    double rho_phi_candidate = 0.5 * phi_dot * phi_dot + V;
+
+    /* Radiation density (photons + ultra-relativistic species) */
+    double rho_r_local = pba->Omega0_g * pow(pba->H0,2) / pow(a,4);
     if (pba->has_ur == _TRUE_) {
-        rho_r += pba->Omega0_ur * pow(pba->H0,2) / pow(a,4);
+        rho_r_local += pba->Omega0_ur * pow(pba->H0,2) / pow(a,4);
     }
-    double activation_threshold = 0.01;  // Activate when rho_phi > 1% of rho_r
-    double ratio = (rho_r > 1e-100) ? rho_phi_candidate / rho_r : 0.0;
-    double width_trans = 0.1;  // Width in log(ratio)
-    double x_trans = (log(MAX(ratio, 1e-50)) - log(activation_threshold)) / width_trans;
-    double trans = 0.5 * (1.0 + tanh(x_trans));  // Smooth transition from 0 to 1
+
+    double activation_threshold = 0.01;
+    double ratio = 0.0;
+    if (rho_r_local > 1e-200 && rho_phi_candidate > 1e-200) {
+        ratio = rho_phi_candidate / rho_r_local;
+    }
+
+    double width_trans = 0.1;
+    double x_trans = (log(MAX(ratio, 1e-60)) - log(activation_threshold)) / width_trans;
+    double trans = 0.5 * (1.0 + tanh(x_trans));
 
     /* Use effective screened coupling with transition */
     double xi_eff = get_xi_eff(pba, phi);
@@ -3071,6 +3095,13 @@ int background_derivs(
     /* Step 1: KG using previous H_dot (standard CLASS approach) */
     /* Smoothly transition the field evolution */
     double H_dot_old = pvecback[pba->index_bg_H_prime] / a;
+    
+    /* Gentle relaxation to reduce lag during activation */
+    /* Note: We use H directly for relaxation since rho_tot/p_tot not readily available */
+    if (trans > 0.1) {
+        H_dot_old = 0.7 * H_dot_old + 0.3 * (-3.0 * H * H);
+    }
+    
     double phi_ddot = -3.0 * H * phi_dot - V_phi + 3.0 * F_phi * (H_dot_old + 2.0 * H * H);
     
     /* Convert to conformal time: phi_primeprime = phi_ddot * a^2 + 2 * H * a^2 * phi_dot */
