@@ -11015,7 +11015,13 @@ int perturbations_tca_slip_and_shear(double * y,
                "PRTOE TCA slip: singular G_eff denominator at a=%e, k2/a2=%e, phi=%e",
                a, k2_a2, phi_current);
     G_eff_ratio_baryons = prtoe_blend_coupling(pba->g_b_prtoe, G_eff_ratio_baryons);
-    slip += F * (G_eff_ratio_baryons - 1.0) * metric_euler;
+    {
+      /* Gauge-aware WEP slip driver: k2*psi (Newtonian) or k2*alpha (synchronous). */
+      double metric_wep_driver = (ppt->gauge == synchronous)
+                                 ? metric_shear
+                                 : metric_euler;
+      slip += F * (G_eff_ratio_baryons - 1.0) * metric_wep_driver;
+    }
   }
 
   if (pth->has_idm_g == _TRUE_ && (ppr->tight_coupling_approximation == (int)first_order_CLASS || ppr->tight_coupling_approximation == (int)second_order_CLASS ||  ppr->tight_coupling_approximation == (int)compromise_CLASS )) {

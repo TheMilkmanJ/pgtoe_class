@@ -968,13 +968,15 @@ int background_functions(
     double trans = prtoe_covariant_trans(rho_phi_here, rho_r_here);
 
     {
-        /* Store physical F_dot (matches Friedmann); scale by trans only in EOM */
+        /* Store physical F_dot (matches Friedmann); trans_eom respects de_mode freeze */
+        double coupling_strength = (pba->de_mode == prtoe_active) ? 1.0 : 0.0;
+        double trans_eom = trans * coupling_strength;
         double F_dot = F_phi * phi_dot;
-        double F_dot_eom = trans * F_dot;
+        double F_dot_eom = trans_eom * F_dot;
         pvecback[pba->index_bg_F_dot_prtoe] = F_dot;
 
         double H_dot;
-        if (F > 1e-30 && trans > 1e-8) {
+        if (F > 1e-30 && trans_eom > 1e-8) {
             H_dot = - (3.0/2.0) * (rho_tot + p_tot) / F
                     - (F_dot_eom * H) / F
                     + pba->K / (a*a);
@@ -982,16 +984,16 @@ int background_functions(
             H_dot = pvecback[pba->index_bg_H_prime] / a;
         }
 
-        double phi_ddot = trans * (-3.0 * H * phi_dot - V_phi
+        double phi_ddot = trans_eom * (-3.0 * H * phi_dot - V_phi
                                    + (F_phi / MAX(F, 1e-30)) * (H_dot + 2.0 * H * H));
-        double phi_primeprime = phi_ddot * a * a + trans * H * a * a * phi_dot;
+        double phi_primeprime = phi_ddot * a * a + trans_eom * H * a * a * phi_dot;
         pvecback[pba->index_bg_ddphi_prtoe] = phi_primeprime;
 
-        double F_ddot = trans * (F_phiphi * phi_dot * phi_dot + F_phi * phi_ddot);
+        double F_ddot = trans_eom * (F_phiphi * phi_dot * phi_dot + F_phi * phi_ddot);
         pvecback[pba->index_bg_F_ddot_prtoe] = F_ddot;
 
-        if (F > 1e-30 && trans > 1e-8) {
-            H_dot = -(phi_dot * phi_dot * trans + F_ddot - H * F_dot_eom) / (2.0 * F);
+        if (F > 1e-30 && trans_eom > 1e-8) {
+            H_dot = -(phi_dot * phi_dot * trans_eom + F_ddot - H * F_dot_eom) / (2.0 * F);
             pvecback[pba->index_bg_H_prime] = a * H_dot;
         } else {
             pvecback[pba->index_bg_H_prime] = -(3.0/2.0) * (rho_tot + p_tot) * a + pba->K / a;
@@ -1042,7 +1044,8 @@ int background_functions(
     double phi_dot_p = phi_prime_prtoe / a;
     double rho_r_p = prtoe_activation_rho_r(pba, a, pvecback, pba->error_message);
     double trans_p = prtoe_covariant_trans(0.5 * phi_dot_p * phi_dot_p + V_p, rho_r_p);
-    double p_prime_prtoe = trans_p * phi_prime_prtoe
+    double trans_eom_p = trans_p * ((pba->de_mode == prtoe_active) ? 1.0 : 0.0);
+    double p_prime_prtoe = trans_eom_p * phi_prime_prtoe
       * (-phi_prime_prtoe * H_bg / a - 2. / 3. * V_phi_p);
     pvecback[pba->index_bg_p_tot_prime] += p_prime_prtoe;
   }
@@ -1482,7 +1485,7 @@ int background_prtoe_local_gravity_post_integration(
                pba->error_message,
                "PRTOE fails solar-system PPN bound: |gamma-1|=%.3e > %.3e at solar density",
                fabs(gamma_minus_one), PRTOE_FIFTH_FORCE_XI_EFF_MAX);
-    class_test(precession_excess > 1.0,
+    class_test(fabs(precession_excess) > 1.0,
                pba->error_message,
                "PRTOE predicts excessive Mercury perihelion precession excess (%.3e rad/orbit)",
                precession_excess);
@@ -3991,8 +3994,23 @@ int prtoe_compute_quantities(
     rho_r += rho_dr;
     if (pba->has_ncdm == _TRUE_) {
       int n_ncdm;
+      double rho_ncdm, p_ncdm, pseudo_p_ncdm;
       for (n_ncdm = 0; n_ncdm < pba->N_ncdm; n_ncdm++) {
-        rho_r += pba->Omega0_ncdm[n_ncdm] * pow(pba->H0, 2) / pow(a, 4);
+        class_call(background_ncdm_momenta(
+                                           pba->q_ncdm_bg[n_ncdm],
+                                           pba->w_ncdm_bg[n_ncdm],
+                                           pba->q_size_ncdm_bg[n_ncdm],
+                                           pba->M_ncdm[n_ncdm],
+                                           pba->factor_ncdm[n_ncdm],
+                                           1./a-1.,
+                                           NULL,
+                                           &rho_ncdm,
+                                           &p_ncdm,
+                                           NULL,
+                                           &pseudo_p_ncdm),
+                   error_message,
+                   error_message);
+        rho_r += 3. * p_ncdm;
       }
     }
     double trans_val = prtoe_covariant_trans(rho_phi_candidate, rho_r);
