@@ -1,7 +1,14 @@
 # PRTOE Code Audit Context
 
-Authoritative constraints for static analysis of the CLASS/PRTOE core.
-Full derivations: `PRTOE_Working_Formulation.md` (Sections 2, 10.4–10.6).
+Auditable PASS/FAIL contracts for the CLASS/PRTOE core.
+
+| Document | Role |
+|----------|------|
+| `PRTOE_PHYSICS_FOR_REVIEW.md` | Compact math/physics for reviewers (primary) |
+| This file | Checklist contracts tied to the four core files |
+| `PRTOE_Working_Formulation.md` | Full derivations when the compact doc is insufficient |
+
+Reviewers report: **Physics** (invariant + §) → **Code** (file:line) → **Impact** (sites/gates). No patches unless asked.
 
 ## Core files (always cross-check together)
 
@@ -91,7 +98,7 @@ Require Omega_cdm > 0 only when prtoe_has_separate_cdm() (null-limit / baryon-on
 ### Newtonian gauge constraint (before alpha/phi solve)
 
 ```
-rho_plus_p_shear must be initialized (neutrino shear at IC) before prtoe_add_to_newtonian_constraint()
+rho_plus_p_shear must include neutrino shear and PRTOE δF shear (via prtoe_accumulate_delta_F_shear) before prtoe_add_to_newtonian_constraint()
 prtoe_fill_scalar_stress_energy uses G_eff/F consistently with total_stress_energy
 ```
 
@@ -127,10 +134,12 @@ xi → 0, beta → 0, Omega0_prtoe → 0  ⇒  F → 1, Ḟ → 0, standard ΛCD
 delta_scf / theta_scf sources divide by rho_prtoe only when
   rho_prtoe > PRTOE_RHO_ACTIVATION_THRESHOLD (1e-30)
 theta_scf uses |rho_prtoe + p_prtoe| > 1e-30 (same scale)
+Synchronous→dump gauge: PRTOE delta_scf/theta_scf get same alpha transform as SCF
+when get_perturbations_in_current_gauge == false
 ```
 
 ## Audit instruction for reviewers
 
 Perform an **exhaustive** sweep of all four core files above. Do not stop after the first few findings. Verify every cross-file contract in this document. If output is truncated, continue in a follow-up response until all items are checked.
 
-**Fix impact protocol:** For every proposed fix, trace all readers/writers of touched symbols in the four core files and report downstream inconsistencies in the same review pass.
+**Physics impact protocol:** For every finding, trace all readers/writers of touched symbols in the four core files and report downstream inconsistencies in the same review pass. State what physics requires; do not prescribe implementation.

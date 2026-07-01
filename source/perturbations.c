@@ -94,6 +94,47 @@ static inline void prtoe_fill_delta_F_from_state(
                         delta_F, delta_F_prime, delta_F_primeprime);
 }
 
+/** Accumulate PRTOE δF anisotropic stress into rho_plus_p_shear (ψ / constraint path). */
+static inline void prtoe_accumulate_delta_F_shear(
+    struct background *pba,
+    struct perturbations_workspace *ppw,
+    double k,
+    double *y)
+{
+  if (pba->de_mode != prtoe_active
+      || pba->index_bg_rho_prtoe < 0
+      || ppw->pv->index_pt_delta_prtoe < 0
+      || ppw->pv->index_pt_ddelta_prtoe < 0
+      || !prtoe_is_covariantly_active_at_tau(pba, ppw->pvecback[pba->index_bg_rho_prtoe]))
+    return;
+
+  if (pba->index_bg_F_prtoe < 0 || pba->index_bg_F_phi_prtoe < 0
+      || pba->index_bg_F_phiphi_prtoe < 0 || pba->index_bg_F_phiphiphi_prtoe < 0
+      || pba->index_bg_dphi_prtoe < 0 || pba->index_bg_ddphi_prtoe < 0)
+    return;
+
+  double F_local = ppw->pvecback[pba->index_bg_F_prtoe];
+  if (F_local <= 0.0 || !isfinite(F_local))
+    return;
+
+  double delta_F_local = 0.0;
+  double delta_F_prime_local = 0.0;
+  double delta_F_primeprime_local = 0.0;
+  prtoe_fill_delta_F_from_state(pba, ppw, k, y,
+                                &delta_F_local, &delta_F_prime_local, &delta_F_primeprime_local);
+
+  double a_local = ppw->pvecback[pba->index_bg_a];
+  double a2_local = a_local * a_local;
+  double a_prime_over_a_local = ppw->pvecback[pba->index_bg_H] * a_local;
+  double k2_local = k * k;
+
+  /* Store unscaled anisotropic stress; G_eff=1/F is applied once in psi assembly. */
+  ppw->rho_plus_p_shear += a2_local
+    * (delta_F_primeprime_local
+       + 2.0 * a_prime_over_a_local * delta_F_prime_local
+       - (k2_local / 3.0) * delta_F_local);
+}
+
 /** True when PRTOE perturbations participate in the metric constraint at IC time. */
 static inline int prtoe_metric_ic_active(
     struct background *pba,
@@ -6111,6 +6152,7 @@ int perturbations_initial_conditions(struct precision * ppr,
               || (pba->has_idr == _TRUE_) || (pba->has_ncdm == _TRUE_)) {
             ppw->rho_plus_p_shear += 4. / 3. * rho_nu * shear_ur;
           }
+          prtoe_accumulate_delta_F_shear(pba, ppw, k, ppw->pv->y);
           prtoe_add_to_newtonian_constraint(pba, ppt, ppw, k, rho_r, rho_m_over_rho_r,
                                             &delta_tot, &velocity_tot);
         }
@@ -7636,24 +7678,10 @@ int perturbations_total_stress_energy(
           && pba->index_bg_F_phiphi_prtoe >= 0 && pba->index_bg_F_phiphiphi_prtoe >= 0
           && pba->index_bg_dphi_prtoe >= 0 && pba->index_bg_ddphi_prtoe >= 0) {
         double F_local = ppw->pvecback[pba->index_bg_F_prtoe];
-        double delta_F_local = 0.0;
-        double delta_F_prime_local = 0.0;
-        double delta_F_primeprime_local = 0.0;
-        prtoe_fill_delta_F_from_state(pba, ppw, k, y,
-                                      &delta_F_local, &delta_F_prime_local, &delta_F_primeprime_local);
-
-        double a_local = ppw->pvecback[pba->index_bg_a];
-        double a2_local = a_local * a_local;
-        double a_prime_over_a_local = ppw->pvecback[pba->index_bg_H] * a_local;
-        double k2_local = k * k;
-
         class_test(F_local <= 0.0 || !isfinite(F_local),
                    ppt->error_message,
                    "PRTOE anisotropic stress: non-positive coupling F=%e", F_local);
-        ppw->rho_plus_p_shear += (a2_local / F_local)
-          * (delta_F_primeprime_local
-             + 2.0 * a_prime_over_a_local * delta_F_prime_local
-             - (k2_local / 3.0) * delta_F_local);
+        prtoe_accumulate_delta_F_shear(pba, ppw, k, y);
       }
     }
 
@@ -8397,8 +8425,7 @@ int perturbations_sources(
         double rho_prtoe_src = pvecback[pba->index_bg_rho_prtoe];
         if (pba->de_mode == prtoe_active
             && prtoe_is_covariantly_active_at_tau(pba, rho_prtoe_src)
-            && ppw->pv->index_pt_delta_prtoe >= 0
-            && rho_prtoe_src > PRTOE_RHO_ACTIVATION_THRESHOLD) {
+            && ppw->pv->index_pt_delta_prtoe >= 0) {
           double w_prtoe = pvecback[pba->index_bg_p_prtoe]/rho_prtoe_src;
           if (ppt->gauge == synchronous){
             delta_rho_scf = 1./3.*(1./a2*ppw->pvecback[pba->index_bg_dphi_prtoe]*y[ppw->pv->index_pt_ddelta_prtoe] + ppw->pvecback[pba->index_bg_dV_scf]*y[ppw->pv->index_pt_delta_prtoe]) + 3.*a_prime_over_a*(1.+w_prtoe)*theta_over_k2;
@@ -9089,6 +9116,17 @@ int perturbations_print_variables(double tau,
         delta_scf += alpha*(-3.0*H*(1.0+pvecback[pba->index_bg_p_scf]/pvecback[pba->index_bg_rho_scf]));
         theta_scf += k*k*alpha;
       }
+      else if (pba->use_prtoe == _TRUE_
+               && pba->de_mode == prtoe_active
+               && ppw->pv->index_pt_delta_prtoe >= 0) {
+        double rho_prtoe_gt = pvecback[pba->index_bg_rho_prtoe];
+        if (prtoe_is_covariantly_active_at_tau(pba, rho_prtoe_gt)
+            && rho_prtoe_gt > PRTOE_RHO_ACTIVATION_THRESHOLD) {
+          double w_prtoe = pvecback[pba->index_bg_p_prtoe] / rho_prtoe_gt;
+          delta_scf += alpha * (-3.0 * H * (1.0 + w_prtoe));
+          theta_scf += k * k * alpha;
+        }
+      }
 
     }
 
@@ -9213,9 +9251,9 @@ int perturbations_print_variables(double tau,
       ppt->size_tensor_perturbation_data[ppw->index_ikout] = 0;
     }
     else{
-      ppt->tensor_perturbations_data[ppw->index_ikout] =
-        (double*)realloc(ppt->tensor_perturbations_data[ppw->index_ikout],
-                sizeof(double)*(ppt->size_tensor_perturbation_data[ppw->index_ikout]+ppt->number_of_tensor_titles));
+      class_realloc(ppt->tensor_perturbations_data[ppw->index_ikout],
+                    (ppt->size_tensor_perturbation_data[ppw->index_ikout]+ppt->number_of_tensor_titles)*sizeof(double),
+                    ppt->error_message);
     }
     storeidx = 0;
     dataptr = ppt->tensor_perturbations_data[ppw->index_ikout]+
@@ -10472,8 +10510,6 @@ int perturbations_derivs(double tau,
 
   /** - vector mode */
   if (_vectors_) {
-
-    fprintf(stderr,"we are in vectors\n");
 
     ssqrt3 = sqrt(1.-2.*pba->K/k2);
     cb2 = pvecthermo[pth->index_th_cb2];

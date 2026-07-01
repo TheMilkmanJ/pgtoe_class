@@ -1,9 +1,17 @@
 # Whitelist PRTOE core files only. Do NOT prefix with "!**/*" — that pattern
 # makes the local `cr` CLI fail with "All files are ignored".
 #
-# GitHub full-context workflow (post on PR):
+# Review philosophy: physics-first (PRTOE_PHYSICS_FOR_REVIEW.md + CONTEXT.md).
+# CodeRabbit states what math requires; implementers choose the code.
+# Local `cr` CLI does NOT print summaries — use scripts/cr-prtoe.sh for banner.
+#
+# GitHub workflows:
 #   @coderabbitai full review
-# Persistent learning examples:
+#   @coderabbitai configuration
+# Learn examples (post on PR):
+#   @coderabbitai Learn: PRTOE reviews are physics-first. Cite CONTEXT.md or
+#     PRTOE_PHYSICS_FOR_REVIEW.md § for every Major finding. State the invariant
+#     in math language; list affected code sites and gates. No diffs unless asked.
 #   @coderabbitai Learn: When trans/F_dot/de_mode changes, trace all readers in
 #     background.c, background.h, perturbations.c, perturbations.h in one review.
 #   @coderabbitai Learn: Every Newtonian metric term needs a synchronous gauge
@@ -12,12 +20,19 @@
 language: en-US
 
 tone_instructions: >-
-  Exhaustive physics audit, not concise summary. Report every violation of
-  CONTEXT.md and PRTOE_Working_Formulation.md. Do not stop after first findings;
-  continue until all four core files and cross-file contracts are verified.
+  Physics-first: cite CONTEXT.md or PRTOE_PHYSICS_FOR_REVIEW §. State invariant violated; list code sites + impact only. No diffs/patches unless asked. Exhaustive contract sweep.
 
 reviews:
   profile: assertive
+
+  review_status: true
+  enable_prompt_for_ai_agents: false
+  high_level_summary_in_walkthrough: true
+
+  high_level_summary_instructions: >-
+    Line 1: ✓ PRTOE .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md +
+    PRTOE_PHYSICS_FOR_REVIEW.md | no auto-patches
+    If absent: CONFIG NOT LOADED. Then summarize changes in plain language.
 
   path_filters:
     - "source/perturbations.c"
@@ -42,85 +57,101 @@ reviews:
   pre_merge_checks:
     custom_checks:
       - mode: warning
+        name: PRTOE yaml config handshake
+        instructions: |
+          FIRST line of the review (walkthrough or summary, before findings):
+          ✓ PRTOE .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md |
+          PRTOE_PHYSICS_FOR_REVIEW.md | impact trace ON | no auto-patches
+          If this instruction block is not in your context, print instead:
+          CONFIG NOT LOADED — .coderabbit.yaml not applied.
+          Mark PASS only if the correct banner line appears first.
+
+      - mode: warning
         name: PRTOE CONTEXT contract sweep
         instructions: |
           Before completing the review, verify every item in CONTEXT.md
-          "Audit instruction" and "Background contracts" / "Perturbation contracts"
-          sections against the whitelisted files. List each contract as PASS or FAIL.
-          If any FAIL, report as Major findings. Do not mark review complete with
-          unchecked contracts.
+          "Background contracts" and "Perturbation contracts" against the
+          whitelisted files. List each contract as PASS or FAIL with physics
+          citation (CONTEXT or PRTOE_PHYSICS_FOR_REVIEW §). FAIL → Major.
+          Do not mark review complete with unchecked contracts.
 
       - mode: warning
-        name: PRTOE fix impact trace
+        name: PRTOE physics impact trace
         instructions: |
-          For every issue found in the diff, perform a mandatory impact sweep:
-          (1) list symbols and indices touched; (2) find every read/write site in
-          background.c, background.h, perturbations.c, perturbations.h; (3) flag
-          downstream inconsistencies in the SAME review (storage vs solver,
-          background_functions vs background_derivs, IC vs evolution, sync vs
-          Newtonian). Never report an isolated fix without listing affected consumers.
+          For every Major finding, list (1) the math invariant violated;
+          (2) symbols/indices involved; (3) every read/write site in
+          background.c, background.h, perturbations.c, perturbations.h that
+          must stay consistent. Do NOT propose code patches or diffs.
+          Flag IC vs evolution, sync vs Newtonian, storage vs solver mismatches.
 
   path_instructions:
     - path: "**/*"
       instructions: |
-        EXHAUSTIVE REVIEW MODE — override brevity bias.
+        PRTOE PHYSICS-FIRST REVIEW (no implementation prescriptions)
 
-        Before analyzing, load CONTEXT.md and PRTOE_Working_Formulation.md as the
-        source of truth. Audit code against those constraints; do not guess.
+        Authority (in order):
+        1. PRTOE_PHYSICS_FOR_REVIEW.md — compact math for audits
+        2. CONTEXT.md — auditable PASS/FAIL contracts
+        3. PRTOE_Working_Formulation.md — derivation disputes only
 
-        Perform a comprehensive sweep of the entire PR diff AND the full content of
-        each whitelisted file. Do not stop at the first few findings. Continue until
-        you have verified all logical dependencies between background.c, background.h,
-        perturbations.c, and perturbations.h.
+        REQUIRED FINDING FORMAT (every Major/Minor):
+          Physics: [invariant/equation violated + doc § citation]
+          Code:    [file:line where implementation diverges]
+          Impact:  [symbols, gates, paired sites — no patches]
+        Do NOT include unified diffs, "Proposed fix", or "Prompt for AI agent"
+        blocks unless the user explicitly requests implementation help.
 
-        MANDATORY FIX IMPACT PROTOCOL (every finding):
-        - Primary bug: file:line, contract violated, proposed fix.
-        - Impact sweep: grep mentally for all uses of changed symbols (F_dot, trans,
-          trans_eom, de_mode, index_bg_*, index_pt_*, rho_prtoe, rho_plus_p_shear,
-          prtoe_is_physically_active, prtoe_is_covariantly_active_at_tau).
-        - Downstream risks: list sites that must change together; propose fixes now,
-          not on a follow-up review.
-        - Gauge pairs: if Newtonian path changes, check synchronous equivalent.
+        Sweep all four whitelisted core files. Do not stop at first findings.
+        Continue until cross-file contracts are checked.
 
-        If truncated, continue in a follow-up response. Format: Major | Minor | Nit.
+        Mandatory consistency pairs:
+        - background_functions ↔ background_derivs (F_dot, trans, de_mode)
+        - IC seeding ↔ later evolution (δφ, η, rho_plus_p_shear, δF shear)
+        - Newtonian metric ↔ synchronous gauge (sources, alpha transforms)
+        - activation predicates (single threshold family everywhere)
 
-        Secondary verification pass (mandatory before finalizing):
-        1. Activation predicates consistent everywhere
-        2. F_dot / trans_eom / de_mode aligned in functions + derivs + storage
-        3. rho_r budget complete for covariant activation (incl. NCDM 3*p)
-        4. p_tot_prime includes PRTOE
-        5. IC metric coupling + rho_plus_p_shear seeded
-        6. Source terms: no divide-by rho_prtoe below PRTOE_RHO_ACTIVATION_THRESHOLD
+        Secondary verification (before finalizing):
+        1. Activation predicates consistent
+        2. F_dot / trans / de_mode aligned in functions + derivs + storage
+        3. rho_r budget complete (incl. NCDM 3p)
+        4. p_tot_prime includes PRTOE when active
+        5. IC shear budget complete before constraint solve
+        6. Source guards at PRTOE_RHO_ACTIVATION_THRESHOLD
         7. Null-limit and unified-dark-sector edge cases
+
+        Format severities: Major | Minor | Nit. If truncated, continue in follow-up.
 
     - path: "**/perturbations.c"
       instructions: |
-        Deep line-by-line static analysis per CONTEXT.md. Report every numerical
-        hazard (divide by rho_prtoe, p_tot, F), gauge inconsistency, and index bug.
-        Cross-check source assembly (delta_scf/theta_scf) with perturbations_derivs.
+        Physics audit: ICs (§3), slip/shear (§2), gauge pairs (§2), sources (§7).
+        Report invariant violations and line locations; no code suggestions.
 
     - path: "**/background.c"
       instructions: |
-        Deep line-by-line static analysis per CONTEXT.md. Report predicate mismatches
-        between background_functions and background_derivs. Trace every stored
-        index_bg_* slot to perturbation consumers.
+        Physics audit: Friedmann (§1), activation (§1), Lambda routing (§1).
+        Trace stored index_bg_* to perturbation consumers; no code suggestions.
 
     - path: "**/perturbations.h"
       instructions: |
-        Audit API surface against source/perturbations.c. Flag every index/gate mismatch.
+        API/gate consistency vs perturbations.c and CONTEXT.md. Physics citations only.
 
     - path: "**/background.h"
       instructions: |
-        Audit inline helpers and indices against source/background.c and CONTEXT.md.
+        Inline helpers and indices vs background.c. Physics citations only.
 
 knowledge_base:
   code_guidelines:
     enabled: true
     filePatterns:
+      - path: "PRTOE_PHYSICS_FOR_REVIEW.md"
+        instructions: |
+          Primary math/physics reference for reviews. Cite section numbers.
+          State invariants violated; never prescribe C implementation.
       - path: "CONTEXT.md"
         instructions: |
-          Primary audit checklist. Every finding must cite which contract is violated.
-          Run full checklist before finalizing; use fix-impact protocol for each item.
+          Auditable contract checklist. Every Major finding must name the
+          contract violated. PASS/FAIL sweep before review completes.
       - path: "PRTOE_Working_Formulation.md"
         instructions: |
-          Full physics specification for derivation-level disputes.
+          Use only for derivation-level disputes when compact doc is insufficient.
+          Prefer PRTOE_PHYSICS_FOR_REVIEW.md for routine audits.
