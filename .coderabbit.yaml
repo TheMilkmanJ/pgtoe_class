@@ -1,4 +1,4 @@
-# Whitelist PRTOE core files only. Do NOT prefix with "!**/*" — that pattern
+# Whitelist PRTOE core files + all of CosmicDashboard. Do NOT prefix with "!**/*" — that pattern
 # makes the local `cr` CLI fail with "All files are ignored".
 #
 # Review philosophy: physics-first (PRTOE_PHYSICS_FOR_REVIEW.md + CONTEXT.md).
@@ -30,7 +30,7 @@ reviews:
   high_level_summary_in_walkthrough: true
 
   high_level_summary_instructions: >-
-    Line 1: ✓ PRTOE .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md +
+    Line 1: ✓ PRTOE+CosmicDashboard .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md +
     PRTOE_PHYSICS_FOR_REVIEW.md | no auto-patches
     If absent: CONFIG NOT LOADED. Then summarize changes in plain language.
 
@@ -39,6 +39,12 @@ reviews:
     - "source/background.c"
     - "include/perturbations.h"
     - "include/background.h"
+    # CosmicDashboard (full app: UI, backend, utils, assets, scripts)
+    - "cosmic_dashboard/**"
+    - "cosmic_explorer.py"
+    - "run_cosmicforge.py"
+    - "launch_cosmic.sh"
+    - "kill_dashboard.ps1"
 
   poem: false
   review_details: true
@@ -60,7 +66,7 @@ reviews:
         name: PRTOE yaml config handshake
         instructions: |
           FIRST line of the review (walkthrough or summary, before findings):
-          ✓ PRTOE .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md |
+          ✓ PRTOE+CosmicDashboard .coderabbit.yaml ACTIVE — physics-first | CONTEXT.md |
           PRTOE_PHYSICS_FOR_REVIEW.md | impact trace ON | no auto-patches
           If this instruction block is not in your context, print instead:
           CONFIG NOT LOADED — .coderabbit.yaml not applied.
@@ -71,7 +77,8 @@ reviews:
         instructions: |
           Before completing the review, verify every item in CONTEXT.md
           "Background contracts" and "Perturbation contracts" against the
-          whitelisted files. List each contract as PASS or FAIL with physics
+          whitelisted files (PRTOE core + cosmic_dashboard integration points).
+          List each contract as PASS or FAIL with physics
           citation (CONTEXT or PRTOE_PHYSICS_FOR_REVIEW §). FAIL → Major.
           Do not mark review complete with unchecked contracts.
 
@@ -80,8 +87,9 @@ reviews:
         instructions: |
           For every Major finding, list (1) the math invariant violated;
           (2) symbols/indices involved; (3) every read/write site in
-          background.c, background.h, perturbations.c, perturbations.h that
-          must stay consistent. Do NOT propose code patches or diffs.
+          background.c, background.h, perturbations.c, perturbations.h (and
+          cosmic_dashboard code that reads/writes PRTOE state) that must stay
+          consistent. Do NOT propose code patches or diffs.
           Flag IC vs evolution, sync vs Newtonian, storage vs solver mismatches.
 
   path_instructions:
@@ -101,7 +109,7 @@ reviews:
         Do NOT include unified diffs, "Proposed fix", or "Prompt for AI agent"
         blocks unless the user explicitly requests implementation help.
 
-        Sweep all four whitelisted core files. Do not stop at first findings.
+        Sweep all whitelisted files (PRTOE core + full cosmic_dashboard). Do not stop at first findings.
         Continue until cross-file contracts are checked.
 
         Mandatory consistency pairs:

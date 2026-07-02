@@ -31,7 +31,17 @@ def _read_file_safely(file_path, max_retries=3, retry_delay=0.1):
     import time as _time
     for attempt in range(max_retries):
         try:
-            # Try to copy the file atomically first
+            # Prefer the dashboard's lock-aware safe reader (avoids triggering
+            # PolyChord/Cobaya exclusive lock tamper alarms during nested sampling).
+            try:
+                from scripts.cosmo_dashboard_backend import safe_read_text_for_monitor
+                content = safe_read_text_for_monitor(Path(file_path), description="chain/log for monitor")
+                if content is not None:
+                    return content
+            except Exception:
+                pass
+
+            # Try to copy the file atomically first (existing strategy)
             with tempfile.NamedTemporaryFile(mode='w+', suffix='.tmp', delete=True) as tmp:
                 shutil.copy2(file_path, tmp.name)
                 tmp.seek(0)

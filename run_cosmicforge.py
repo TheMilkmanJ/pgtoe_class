@@ -1260,6 +1260,28 @@ def main():
             # Output in Cobaya log format (dashboard parser extracts real-time statistics from this pattern)
             print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [model] Computed derived parameters: {log_derived}")
 
+            # Periodic lightweight live status for Real-Time Monitor / CosmicForge section.
+            # Written atomically to a side file that the dashboard can safely read even while
+            # PolyChord holds exclusive locks on its own output files. This + psutil process monitoring
+            # = real-time CPU/progress WITHOUT setting off Cobaya tamper alarms or compromising evidence.
+            if eval_count % 20 == 0:
+                try:
+                    live_status = {
+                        "timestamp": time.time(),
+                        "eval_count": eval_count,
+                        "current_chi2_penalized": float(chi2_penalized),
+                        "viability": float(viability_score),
+                        "total_penalty": float(total_penalty),
+                    }
+                    live_path = Path("chains") / f"{os.path.basename(output_prefix)}.dashboard_live.json"
+                    live_path.parent.mkdir(exist_ok=True)
+                    tmp = live_path.with_suffix(".dashboard_live.json.tmp")
+                    with open(tmp, "w") as lf:
+                        json.dump(live_status, lf)
+                    os.replace(str(tmp), str(live_path))
+                except Exception:
+                    pass
+
             # Calculate physical sanity penalties & viability score using model-agnostic constraints
             # If age is not in derived_dict, try to extract it from classy provider
             if "age" not in derived_dict:
@@ -1316,6 +1338,32 @@ def main():
                     lf.write("  ".join(f"{v:.15E}" for v in row_values) + "\n")
                     
                 print(f" {time.strftime('%Y-%m-%d %H:%M:%S')},000 [optimizer] New best fit found! Raw Chi2 = {raw_chi2:.4f}, Penalized = {chi2_penalized:.4f}, Viability = {viability_score:.1f}%")
+
+                # NEW: Write a tiny, unlocked side-channel live status for the Real-Time Monitor.
+                # This file is written by the sampler process itself using atomic rename.
+                # The dashboard can read it without ever touching PolyChord's locked .txt / .resume / chain files.
+                # This is the key to real-time monitoring (CPU + progress) without triggering tamper alarms
+                # or compromising evidence (the side file is explicitly "telemetry only"; final evidence
+                # is the standard chains + .stats + .resume written by PolyChord).
+                try:
+                    live_status = {
+                        "timestamp": time.time(),
+                        "eval_count": eval_count,
+                        "best_chi2_penalized": float(chi2_penalized),
+                        "best_chi2_raw": float(raw_chi2),
+                        "viability": float(viability_score),
+                        "total_penalty": float(total_penalty),
+                        "nlive": 250,  # from config in this context
+                        "ndead": eval_count,  # approximate for optimizer phase
+                    }
+                    live_path = Path("chains") / f"{os.path.basename(output_prefix)}.dashboard_live.json"
+                    live_path.parent.mkdir(exist_ok=True)
+                    tmp = live_path.with_suffix(".dashboard_live.json.tmp")
+                    with open(tmp, "w") as lf:
+                        json.dump(live_status, lf)
+                    os.replace(str(tmp), str(live_path))  # atomic on POSIX
+                except Exception:
+                    pass
 
             # Track unphysical points (viability is 0%) to map out unphysical wedges
             if viability_score <= 0.0:

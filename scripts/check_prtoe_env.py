@@ -28,7 +28,7 @@ def main() -> int:
     except ImportError as exc:
         tag = f"cpython-{sys.version_info.major}{sys.version_info.minor}"
         print(f"classy extension: MISSING for {tag} ({exc})")
-        print("  Fix: conda activate pgtoe_gold && cd ~/prtoe_class && make classy")
+        print("  Fix: cd ~/prtoe_class && make -j8 classy  (use same python as tests)")
 
     r = subprocess.run(
         [class_bin, "test_prtoe_bg_only.ini"],

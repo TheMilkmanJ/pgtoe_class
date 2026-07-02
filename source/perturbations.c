@@ -30,6 +30,9 @@
 
 /* Guard against multi-million tau grids (e.g. a_ini=1e-18) blowing RAM / int indices */
 #define _PERTURBATIONS_MAX_TAU_SAMPLING_ 300000
+/* When the adaptive counter hits the cap before covering most of conformal time,
+   rebuild a modest log-spaced grid instead of allocating k*tau sources at full cap. */
+#define _PERTURBATIONS_COARSE_TAU_SAMPLING_ 12000
 
 /**
  * PRTOE helper function: Compute delta_F and derivatives for perturbation equations
@@ -1852,6 +1855,9 @@ int perturbations_timesampling_for_sources(
   double * pvecback;
   double * pvecthermo;
 
+  short tau_cap_hit_early = _FALSE_;
+  double tau_at_cap = 0.;
+
   /** - allocate background/thermodynamics vectors */
 
   class_alloc(pvecback,pba->bg_size*sizeof(double),ppt->error_message);
@@ -2145,6 +2151,10 @@ int perturbations_timesampling_for_sources(
     counter++;
 
     if (counter >= _PERTURBATIONS_MAX_TAU_SAMPLING_) {
+      tau_at_cap = tau;
+      if (tau < 0.25 * pba->conformal_age) {
+        tau_cap_hit_early = _TRUE_;
+      }
       fprintf(stderr,
               "WARNING: perturbations tau sampling hit cap %d at tau=%e; coarsening remaining grid.\n",
               _PERTURBATIONS_MAX_TAU_SAMPLING_, tau);
@@ -2155,6 +2165,38 @@ int perturbations_timesampling_for_sources(
 
   /** - --> infer total number of time steps, ppt->tau_size */
   ppt->tau_size = counter;
+
+  if (tau_cap_hit_early == _TRUE_) {
+    const int coarse_n = _PERTURBATIONS_COARSE_TAU_SAMPLING_;
+    double log_tau_ini;
+    double log_tau_end;
+    int index_coarse;
+
+    if (tau_ini <= 0.) {
+      tau_ini = pba->conformal_age * 1e-8;
+      if (tau_at_cap > tau_ini) {
+        tau_ini = tau_at_cap * 1e-3;
+      }
+    }
+
+    ppt->tau_size = coarse_n + 1;
+    class_alloc(ppt->tau_sampling,ppt->tau_size * sizeof(double),ppt->error_message);
+
+    log_tau_ini = log(tau_ini);
+    log_tau_end = log(pba->conformal_age);
+    for (index_coarse = 0; index_coarse <= coarse_n; index_coarse++) {
+      double frac = (double)index_coarse / (double)coarse_n;
+      ppt->tau_sampling[index_coarse] = exp(log_tau_ini + frac * (log_tau_end - log_tau_ini));
+    }
+
+    fprintf(stderr,
+            "WARNING: rebuilt log-spaced tau grid (%d points) after early cap at tau=%e (conformal_age=%e).\n",
+            ppt->tau_size, tau_at_cap, pba->conformal_age);
+
+    free(pvecback);
+    free(pvecthermo);
+    goto perturbations_tau_sampling_allocate_sources;
+  }
 
   /** - --> allocate array of time steps, ppt->tau_sampling[index_tau] */
   class_alloc(ppt->tau_sampling,ppt->tau_size * sizeof(double),ppt->error_message);
@@ -2247,9 +2289,36 @@ int perturbations_timesampling_for_sources(
     ppt->tau_sampling[counter]=tau;
 
     if (counter >= _PERTURBATIONS_MAX_TAU_SAMPLING_) {
+      tau_at_cap = tau;
       fprintf(stderr,
               "WARNING: perturbations tau fill hit cap %d at tau=%e; jumping to conformal_age.\n",
               _PERTURBATIONS_MAX_TAU_SAMPLING_, tau);
+      if (tau < 0.25 * pba->conformal_age) {
+        const int coarse_n = _PERTURBATIONS_COARSE_TAU_SAMPLING_;
+        double log_tau_ini;
+        double log_tau_end;
+        int index_coarse;
+
+        tau_cap_hit_early = _TRUE_;
+        free(ppt->tau_sampling);
+        if (tau_ini <= 0.) {
+          tau_ini = pba->conformal_age * 1e-8;
+        }
+        ppt->tau_size = coarse_n + 1;
+        class_alloc(ppt->tau_sampling,ppt->tau_size * sizeof(double),ppt->error_message);
+        log_tau_ini = log(tau_ini);
+        log_tau_end = log(pba->conformal_age);
+        for (index_coarse = 0; index_coarse <= coarse_n; index_coarse++) {
+          double frac = (double)index_coarse / (double)coarse_n;
+          ppt->tau_sampling[index_coarse] = exp(log_tau_ini + frac * (log_tau_end - log_tau_ini));
+        }
+        fprintf(stderr,
+                "WARNING: rebuilt log-spaced tau grid (%d points) after fill cap at tau=%e (conformal_age=%e).\n",
+                ppt->tau_size, tau_at_cap, pba->conformal_age);
+        free(pvecback);
+        free(pvecthermo);
+        goto perturbations_tau_sampling_allocate_sources;
+      }
       break;
     }
 
@@ -2260,6 +2329,8 @@ int perturbations_timesampling_for_sources(
 
   free(pvecback);
   free(pvecthermo);
+
+ perturbations_tau_sampling_allocate_sources:
 
   /** - check the maximum redshift z_max_pk at which the Fourier
       transfer functions \f$ T_i(k,z)\f$ should be computable by

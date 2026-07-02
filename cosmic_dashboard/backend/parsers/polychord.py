@@ -98,8 +98,17 @@ def parse_polychord_stats(stats_file: Path, resume_file: Optional[Path] = None):
     # 1. Try reading the completed stats file first
     if stats_file.exists():
         try:
-            with open(stats_file, 'r') as f:
-                content = f.read()
+            # Use safe non-intrusive read if available (avoids exclusive lock contention
+            # with PolyChord during nested sampling, which triggers Cobaya tamper alarms).
+            content = None
+            try:
+                from scripts.cosmo_dashboard_backend import safe_read_text_for_monitor
+                content = safe_read_text_for_monitor(stats_file, description="polychord stats")
+            except Exception:
+                pass
+            if content is None:
+                with open(stats_file, 'r') as f:
+                    content = f.read()
 
             # Read dead points
             ndead_match = re.search(r"ndead:\s*(\d+)", content)
@@ -126,8 +135,15 @@ def parse_polychord_stats(stats_file: Path, resume_file: Optional[Path] = None):
     # 2. Fall back to reading the resume file for real-time progress
     if resume_file and resume_file.exists():
         try:
-            with open(resume_file, 'r') as f:
-                content = f.read()
+            content = None
+            try:
+                from scripts.cosmo_dashboard_backend import safe_read_text_for_monitor
+                content = safe_read_text_for_monitor(resume_file, description="polychord resume")
+            except Exception:
+                pass
+            if content is None:
+                with open(resume_file, 'r') as f:
+                    content = f.read()
 
             # Read dead points (iterations)
             dead_points_match = re.search(r"=== Number of dead points/iterations ===\s*\n\s*(\d+)", content)

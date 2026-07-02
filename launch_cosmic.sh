@@ -22,7 +22,7 @@ RESTART_DELAY=5   # seconds to wait before restarting a crashed service
 
 # Set Python path to prtoe_gold conda environment directly to avoid shell function activation crashes
 PYTHON=""
-for _env in prtoe_gold pgtoe_gold; do
+for _env in prtoe_gold; do
   for _root in "/home/themilkmanj/miniconda3" "$HOME/miniconda3" "$HOME/anaconda3"; do
     if [ -f "${_root}/envs/${_env}/bin/python3" ]; then
       PYTHON="${_root}/envs/${_env}/bin/python3"
@@ -32,11 +32,10 @@ for _env in prtoe_gold pgtoe_gold; do
 done
 if [ -z "$PYTHON" ] && command -v conda &>/dev/null; then
     PYTHON=$(conda run -n prtoe_gold --no-capture-output python3 2>/dev/null \
-      || conda run -n pgtoe_gold --no-capture-output python3 2>/dev/null \
       || command -v python3 || command -v python)
 elif [ -z "$PYTHON" ] && [ -n "${CONDA_PREFIX:-}" ]; then
     PYTHON="${CONDA_PREFIX}/bin/python3"
-else
+elif [ -z "$PYTHON" ]; then
     PYTHON=$(command -v python3 || command -v python)
     # Add ~/.local/bin to PATH for pip-installed packages when not using conda
     export PATH="$HOME/.local/bin:${PATH}"

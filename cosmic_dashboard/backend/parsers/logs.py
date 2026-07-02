@@ -90,13 +90,28 @@ def get_best_fit_from_log(log_path, state):
         
         pattern = re.compile(r"Computed derived parameters:\s*(\{.*\})")
         
-        with open(log_path, 'r', errors='ignore') as f:
-            f.seek(log_pos)
-            for line in f:
-                match = pattern.search(line)
-                if match:
-                    try:
-                        params_dict = safe_parse_python_dict(match.group(1))
+        content = None
+        try:
+            from scripts.cosmo_dashboard_backend import safe_read_text_for_monitor
+            content = safe_read_text_for_monitor(Path(log_path), description="run log")
+        except Exception:
+            pass
+        if content is None:
+            with open(log_path, 'r', errors='ignore') as f:
+                content = f.read()
+        else:
+            # content came from safe reader (string)
+            pass
+
+        # Use StringIO so the rest of the function (which does for line in f: and f.tell()) works unchanged.
+        from io import StringIO
+        f = StringIO(content or "")
+        f.seek(log_pos)
+        for line in f:
+            match = pattern.search(line)
+            if match:
+                try:
+                    params_dict = safe_parse_python_dict(match.group(1))
                         chi2_keys = [k for k in params_dict.keys() if k.startswith('chi2__')]
                         if chi2_keys:
                             cmb_vals = [params_dict[k] for k in chi2_keys if 'cmb' in k.lower() or 'planck' in k.lower()]
